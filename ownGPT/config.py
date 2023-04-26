@@ -1,12 +1,14 @@
 
 # various dimensions (for attention)
-d_attn = 1024 # 
-d_x = 64 # current token
+d_attn = 124 # 
+d_x = 32 # current token
 d_z = 64 # context token
-d_out = 64 # output dim
+d_mid = 128
+d_out = 256 # output dim
+
 
 # number of attention heads
-H = 6
+attn_heads = 6
 
 # sequence lengths 
 # "features" which are in our case rows of the "attention matrices"
