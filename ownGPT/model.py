@@ -3,7 +3,7 @@ TODO:
 - dependencies
 
 """
-import config
+from ownGPT import config
 from flax import linen as nn 
 import jax
 import jax.numpy as jnp
@@ -13,52 +13,66 @@ import math
 # TODO: refactor: make classes independent of config (pass as parameters)
 
 class Attention(nn.Module):
+    # embedding dimension of key and query ("attention dimension")
+    d_attn: int
+    # dimension of value (d_mid or d_out in Phuong/Hutter)
+    d_v: int
+
     @nn.compact
     def __call__(self, x, z):
-        # assume x: (l_x, d_x), z: (l_z, d_z)
-        # TODO: add assert?
-
         # query
+        # l_x: typically token length
+        # input x: (l_x, d_x)
         # operator: (d_x, d_attn) (features = number of cols)
-        # q: (l_x, d_attn) (left mult with x apparently) TODO: check!
-        q = nn.Dense(features = config.d_attn)(x) # TODO: with bias?
+        # output q: (l_x, d_attn) (left mult with input x)
+        q = nn.Dense(features = self.d_attn)(x) # TODO: with bias?
 
         # key
-        # operator: (d_z, d_attn)
-        # k: (l_z, d_attn)
-        k = nn.Dense(features = config.d_attn)(z)
+        # l_z: typically token length
+        # input z (l_z, d_z)
+        # operator (d_z, d_attn)
+        # k (l_z, d_attn) (left mult with input z)
+        k = nn.Dense(features = self.d_attn)(z)
 
         # value
-        # operator: (d_z, d_mid) (or d_out)
-        # v: (l_z, d_out)
-        v = nn.Dense(features = config.d_mid)(z) # TODO: are these different operators? and are they "persistent" for training?
+        # input z (l_z, d_z)
+        # operator (d_z, d_v)
+        # v (l_z, d_v)
+        v = nn.Dense(features = self.d_v)(z) # TODO: are these different operators? and are they "persistent" for training?
         
-        # score
+        # scores (l_x, l_z)
         s = q @ jnp.transpose(k)
 
         # TODO: masking
 
-        # attention: (l_x, d_mid)
+        # attention (l_x, d_v)
         y = jax.nn.softmax(s/math.sqrt(config.d_attn)) @ v 
         return y
 
-att = Attention()
-variables2 = att.init(jax.random.PRNGKey(0),  jnp.ones((config.l_x, config.d_x)), jnp.ones((config.l_z, config.d_z)))
-print(att.apply(variables2,  jnp.ones((config.l_x, config.d_x)), jnp.ones((config.l_z, config.d_z))).shape)
-#print(att.tabulate(jax.random.PRNGKey(0), jnp.ones((64, 64)), jnp.ones((64, 64))))
 
 class MHAttention(nn.Module):
+    # embedding dimension of key and query ("attention dimension")
+    d_attn: int
+    # dimension of value (d_mid or d_out in Phuong/Hutter)
+    d_v: int
+    # output dimension
+    d_out: int
+    # number of heads
+    attn_heads: int
+    # token length
+    # TODO: necessary?
+    l_x: int
+
     def setup(self):
-        self.attns = [Attention() for idx in range(config.attn_heads)]
+        self.attns = [Attention(d_attn=self.d_attn, d_v=self.d_v) for idx in range(self.attn_heads)]
+        self.w_out = nn.Dense(features=self.d_out)
 
     def __call__(self, x, z):
-        y = jnp.zeros((config.attn_heads*config.d_mid, config.l_x))
+        y = jnp.zeros((self.l_x, self.attn_heads*self.d_v))
         for idx, attn in enumerate(self.attns):
-            y = y.at[: , idx: idx+config.d_mid].set(attn(x, z))
-        w = nn.Dense(features=config.attn_heads*config.d_mid)(y) # TODO: check: mult from right?
+            # TODO: how to do this better?
+            y = y.at[: , idx: idx+config.d_v].set(attn(x, z))
+        w = self.w_out(y) #nn.Dense(features=config.attn_heads*config.d_mid)(y) # TODO: check: mult from right?
         return w
 
-mattn = MHAttention()
-#variables = mattn.init(jax.random.PRNGKey(0), jnp.ones((config.l_x, config.d_x)), jnp.ones((config.l_z, config.d_z)))
-#print(mattn.apply(variables, jnp.ones(config.l_x, config.d_x), jnp.ones(config.l_z, config.d_z)).shape)
  

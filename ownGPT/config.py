@@ -3,7 +3,7 @@
 d_attn = 124 # 
 d_x = 32 # current token
 d_z = 64 # context token
-d_mid = 128
+d_v = 128
 d_out = 256 # output dim
 
 
