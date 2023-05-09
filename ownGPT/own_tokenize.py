@@ -4,10 +4,8 @@ from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
-import config
+from ownGPT import config
 from typing import List
-
-# TODO: include loading from json file
 
 def postprocess_tokenizer(tokenizer: Tokenizer) -> Tokenizer:
     # postprocessing a la BERT and transformer?!?
@@ -25,9 +23,10 @@ def postprocess_tokenizer(tokenizer: Tokenizer) -> Tokenizer:
 
 
 def train_BPE_tokenizer(file_paths: List[Path], tokens_save_path: Path=None) -> Tokenizer:
+    # TODO: fix file_paths -> either List[str] or cast here
     # TODO: need unknown token?!
     tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
-    trainer = BpeTrainer(special_tokens=["[UNK]", "[BOS]", "[EOS]", "[MSK]"], vocab_size=config.N_V)
+    trainer = BpeTrainer(special_tokens=["[UNK]", "[BOS]", "[EOS]", "[MSK]"], vocab_size=config.vocab_size)
     tokenizer.pre_tokenizer = Whitespace()
     # TODO: already add convert to string here?
     tokenizer.train(file_paths, trainer)
