@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
-from ownGPT import config, model
+from ownGPT import config, own_tokenize, model
+from pathlib import Path
 
 # TODO: unify some tests?
 
@@ -34,25 +35,77 @@ def test_DTransformerActivation():
 
 
 def test_DTransformerBlock():
-    mattn = model.MHAttention(d_attn=config.d_attn, d_v=config.d_v, d_out=config.d_out, attn_heads=config.attn_heads, l_x=config.l_x)
+    #mattn = model.MHAttention(d_attn=config.d_attn, d_v=config.d_v, d_out=config.d_out, attn_heads=config.attn_heads, l_x=config.l_x)
     #variables_mattn = mattn.init(jax.random.PRNGKey(0), jnp.ones((config.l_x, config.d_x)), jnp.ones((config.l_x, config.d_x)))
     # output shape: (l_x, d_out)
-    dta = model.DTransformerActivationLayer(d_mlp=config.d_mlp, d_e=config.d_out)
+    #dta = model.DTransformerActivationLayer(d_mlp=config.d_mlp, d_e=config.d_out)
     #variables_dta = dta.init(jax.random.PRNGKey(0), jnp.ones((config.l_x, config.d_out)))
     # output shape: (l_x, d_out)
-    ln1 = model.LayerNormalization()
+    #ln1 = model.LayerNormalization()
     #variables_ln1 = ln1.init(jax.random.PRNGKey(0), jnp.ones(config.d_out,))
-    ln2 = model.LayerNormalization()
+    #ln2 = model.LayerNormalization()
     #variables_ln1 = ln2.init(jax.random.PRNGKey(0), jnp.ones(config.d_out,))
 
     dtb  = model.DTransformerBlock(
             d_e=config.d_e, 
             d_mlp=config.d_mlp,
-            mhattention=mattn,
-            act_layer=dta,
-            layer_norm1=ln1,
-            layer_norm2=ln2
+            d_attn=config.d_attn,
+            d_v=config.d_v,
+            d_out=config.d_e,
+            attn_heads=config.attn_heads,
+            l_x=config.l_x
     )
-    variables_dtb = dtb.init(jax.random.PRNGKey(0), jnp.ones((config.l_x, config.d_x))) 
-    returned = dtb.apply(variables_dtb, jnp.ones((config.l_x, config.d_x)))
-    assert returned.shape == (config.l_x, config.d_x)
+    variables_dtb = dtb.init(jax.random.PRNGKey(0), jnp.ones((config.l_x, config.d_e))) 
+    returned = dtb.apply(variables_dtb, jnp.ones((config.l_x, config.d_e)))
+    assert returned.shape == (config.l_x, config.d_e)
+
+
+def test_TransformerEmbedding(test_path):
+    te = model.DTransformerEmbedding(
+        d_e = config.d_e,
+        l_max = config.l_x, 
+        vocab_size=185 # TODO: read from test_tokens.json?
+    )
+    tokens_file = test_path / Path("test_tokens.json")
+    # TODO: fix Path vs string...
+    tokenizer = own_tokenize.load_BPE_tokenizer(str(tokens_file))
+    x = "Hi there!"
+    x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
+    print(x_ids)
+    print(type(x_ids))
+    variables_te = te.init(jax.random.PRNGKey(0), jnp.ones(len(x_ids)))
+    returned = te.apply(variables_te, x_ids)
+    print(returned)
+
+
+def test_DTransformer(test_path):
+    te = model.DTransformerEmbedding(
+        d_e = config.d_e,
+        l_max = config.l_x, 
+        vocab_size=185 # TODO: read from test_tokens.json?
+    )
+    tokens_file = test_path / Path("test_tokens.json")
+    # TODO: fix Path vs string...
+    tokenizer = own_tokenize.load_BPE_tokenizer(str(tokens_file))
+    x = "Hi there!"
+    x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
+    print(x_ids)
+    print(type(x_ids))
+    #variables_te = te.init(jax.random.PRNGKey(0), jnp.ones(len(x_ids)))
+    #X = te.apply(variables_te, x_ids)
+    #print(f"shape of X: {X.shape}")
+    #variables_dtb = dtb.init(jax.random.PRNGKey(0), jnp.ones((config.l_x, config.d_e))) #jnp.ones((config.l_x, config.d_e))) 
+    dtransfomer = model.DTransformer(
+        vocab_size=185,
+        l_max=config.l_x,
+        d_e=config.d_e,
+        d_mlp=config.d_mlp,
+        d_v=config.d_v,
+        num_layers=1,
+        attn_heads=6,        
+    )
+    variables_dtransformer = dtransfomer.init(jax.random.PRNGKey(0), x_ids) # jnp.ones((config.l_x, config.d_e)))
+    returned = dtransfomer.apply(variables_dtransformer, x_ids) 
+    print(returned)
+
+

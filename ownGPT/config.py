@@ -3,7 +3,7 @@ import os
 
 # various dimensions (for attention)
 d_attn = 124
-d_e = 768
+d_e = 2 #768 #256
 d_mlp = 768 # TODO: which choice?
 d_x = 32 # current token
 d_z = 64 # context token
@@ -16,13 +16,13 @@ attn_heads = 6
 
 # sequence lengths 
 # "features" which are in our case rows of the "attention matrices"
-l_x = 16
+l_x = 8 #16
 l_z = 16
 # maximal sequence length
 l_max = 512 # 1024
 
 # vocabulary size
-N_V = 50304 # taken from nanoGPT
+vocab_size = 50304 # taken from nanoGPT
 
 # data paths
 cwd = Path(__file__).parents[1].resolve()
