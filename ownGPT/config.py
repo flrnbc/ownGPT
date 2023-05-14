@@ -16,10 +16,12 @@ attn_heads = 6
 
 # sequence lengths 
 # "features" which are in our case rows of the "attention matrices"
-l_x = 8 #16
+l_x = 12 #16
 l_z = 16
 # maximal sequence length
-l_max = 512 # 1024
+l_max = 32 # 1024
+# maximal generated length
+l_gen = 64 
 
 # vocabulary size
 vocab_size = 50304 # taken from nanoGPT

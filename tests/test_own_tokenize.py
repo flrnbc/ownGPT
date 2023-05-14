@@ -17,5 +17,6 @@ def test_train_BPE_tokenizer(test_text_file, test_path):
     encode = bpe_tokenizer.encode("Hello, my lord!", "How is it going?")
     print(encode.tokens)
     print(jnp.array(encode.ids))
+    print(bpe_tokenizer.decode([6, 7, 8]))
     # remove file
     # save_tokens.unlink()

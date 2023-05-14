@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 from ownGPT import config, own_tokenize, model
 from pathlib import Path
 
@@ -81,14 +82,17 @@ def test_TransformerEmbedding(test_path):
 def test_DTransformer(test_path):
     te = model.DTransformerEmbedding(
         d_e = config.d_e,
-        l_max = config.l_x, 
+        l_max = config.l_max, 
         vocab_size=185 # TODO: read from test_tokens.json?
     )
     tokens_file = test_path / Path("test_tokens.json")
     # TODO: fix Path vs string...
     tokenizer = own_tokenize.load_BPE_tokenizer(str(tokens_file))
-    x = "Hi there!"
-    x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
+    x = "Hi there! Yay"
+    x_ids = tokenizer.encode(x).ids
+    l_x = len(x_ids)
+    # TODO: is padding correct here?
+    x_ids = jnp.pad(np.array(x_ids), (0, 0), "constant") #config.l_max - l_x), "constant")
     print(x_ids)
     print(type(x_ids))
     #variables_te = te.init(jax.random.PRNGKey(0), jnp.ones(len(x_ids)))
@@ -97,15 +101,21 @@ def test_DTransformer(test_path):
     #variables_dtb = dtb.init(jax.random.PRNGKey(0), jnp.ones((config.l_x, config.d_e))) #jnp.ones((config.l_x, config.d_e))) 
     dtransfomer = model.DTransformer(
         vocab_size=185,
-        l_max=config.l_x,
+        l_gen=3,
+        l_max=config.l_max,
+        l_x=l_x,
         d_e=config.d_e,
         d_mlp=config.d_mlp,
         d_v=config.d_v,
         num_layers=1,
         attn_heads=6,        
     )
-    variables_dtransformer = dtransfomer.init(jax.random.PRNGKey(0), x_ids) # jnp.ones((config.l_x, config.d_e)))
-    returned = dtransfomer.apply(variables_dtransformer, x_ids) 
+    variables_dtransformer = dtransfomer.init(jax.random.PRNGKey(0), x_ids) #jnp.ones((config.l_x, config.d_e)))
+    returned = dtransfomer.apply(variables_dtransformer, x_ids) # NOTE: apply wraps the call (but a direct call throws an error...)
     print(returned)
+
+    # TODO: split tests
+    returned = dtransfomer.infer(tokenizer=tokenizer, x=x, variables=variables_dtransformer)
+    print(f"returned: {returned}")
 
 

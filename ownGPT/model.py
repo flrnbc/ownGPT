@@ -1,6 +1,7 @@
 """
 TODO: 
 - dependencies
+- jit where possible (e.g. for loops)
 
 """
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from jax.nn import gelu
 import math
 from typing import Callable
 from ownGPT import own_tokenize, config
+from tokenizers import Tokenizer
 from pathlib import Path
 
 # TODO: type annotation?!
@@ -197,17 +199,23 @@ class DTransformerEmbedding(nn.Module):
         self.pos_embed      = nn.Embed(num_embeddings=self.l_max, features=self.d_e)
 
     def __call__(self, x: jnp.array):
-        "actually assume that x is a jnp.array with int entries"
+        # TODO: actually assume that x is a jnp.array with int entries
         X = jnp.zeros(shape=(x.size, self.d_e))
         x_int = x.astype(int)   # just to be sure 
                                 # TODO: need int32?
-        x_enum = jnp.array([i for i in range(x_int.size)], dtype=int)
 
-        X = X.at[:,:].add(self.word_embed(x_int) + self.pos_embed(x_enum))
-        #for i in range(x.size): #, xi in x.enumerate():
+        # note that we embed all possible positions even though len(x) might be less
+        x_enum = jnp.array([i for i in range(self.l_max)], dtype=int)
+        x_pembed = self.pos_embed(x_enum)
+        x_wembed = self.word_embed(x_int)
+
+        # NOTE: the following line does not work because the shapes might be differnt (unless len(x)=l_max) 
+        # X = X.at[:,:].add(x_wembed + x_pembed)
+
+        for i in range(x.size):
         #    print(type(x))
         #    print(type(x[i]))
-        #    X.at[i,:].set(self.word_embed(x_int[i]) + self.pos_embed(i))
+            X = X.at[i,:].set(x_wembed[i,:] + x_pembed[i,:])
         
         return X
 
@@ -226,7 +234,10 @@ class TransformerUnembedding(nn.Module):
 class DTransformer(nn.Module):
     vocab_size: int     # vocabulary size
                         # TODO: determined by tokenizer?
+    l_gen: int          # max generated sequence
     l_max: int          # max sequence length
+    l_x: int            # token length of input
+                        # TODO: how to avoid requiring this here?
     d_e: int            # word embedding dimension
     d_v: int
     d_mlp: int          # output dimension of "activation layers"
@@ -235,6 +246,7 @@ class DTransformer(nn.Module):
     #dtransformer_block: DTransformerBlock
 
     def setup(self):
+        # TODO: add assert l_max >= l_x
         self.dtransformer_embed = DTransformerEmbedding(
             d_e=self.d_e, 
             l_max=self.l_max, 
@@ -247,7 +259,7 @@ class DTransformer(nn.Module):
             d_v=self.d_v,
             d_out=self.d_e, # that's at least typical...
             attn_heads=self.attn_heads,
-            l_x=self.l_max
+            l_x=self.l_x #l_max
         ) 
         self.final_layer_norm = LayerNormalization()
         self.unembed   = TransformerUnembedding(vocab_size=self.vocab_size)
@@ -266,4 +278,32 @@ class DTransformer(nn.Module):
             # TODO: refactor to matrix form?!
             Y_normalized = Y_normalized.at[i,:].set(self.final_layer_norm(Y[i,:]))
 
-        return self.unembed(Y_normalized) 
+        return self.unembed(Y_normalized)
+
+    
+    def infer(self, tokenizer: Tokenizer, x: str, variables):
+        x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
+        # TODO: in Hutter/Phuong this call is in the following loop. But why?!
+        len_x_ids = len(x_ids)
+        #y = jnp.zeros(shape=(len_x_ids + self.l_gen,))
+        #y = y.at[:len_x_ids].set(x_ids)
+        #variables = self.init(jax.random.PRNGKey(0), x_ids)
+
+        for i in range(self.l_gen):
+            # NOTE: we call the transformer in each iteration step
+            #variables = self.init(jax.random.PRNGKey(0), x_ids)
+            # TODO: totally unclear: don't we "forget" our learnt parameters if we repeat the init step?
+            print(f"{i}: {x_ids[i:]}")
+            P = self.apply(variables, x_ids[i:]) 
+            #print(variables)
+            new_token = jax.random.choice(
+                    key=jax.random.PRNGKey(0), 
+                    a=self.vocab_size, 
+                    p=P[len_x_ids+i,:])
+            print(f"new: {new_token}")
+            x_ids = jnp.append(x_ids, new_token)
+            #x_ids = x_ids.at[len_x_ids+i:].set(new_token)
+            print(x_ids)
+
+        return tokenizer.decode(x_ids[len_x_ids:])
+
