@@ -92,7 +92,7 @@ def test_DTransformer(test_path):
     x_ids = tokenizer.encode(x).ids
     l_x = len(x_ids)
     # TODO: is padding correct here?
-    x_ids = jnp.pad(np.array(x_ids), (0, 0), "constant") #config.l_max - l_x), "constant")
+    x_ids = jnp.pad(np.array(x_ids), (0, config.l_max - l_x), "constant") #config.l_max - l_x), "constant")
     print(x_ids)
     print(type(x_ids))
     #variables_te = te.init(jax.random.PRNGKey(0), jnp.ones(len(x_ids)))
@@ -101,18 +101,16 @@ def test_DTransformer(test_path):
     #variables_dtb = dtb.init(jax.random.PRNGKey(0), jnp.ones((config.l_x, config.d_e))) #jnp.ones((config.l_x, config.d_e))) 
     dtransfomer = model.DTransformer(
         vocab_size=185,
-        l_gen=3,
+        l_gen=30,
         l_max=config.l_max,
-        l_x=l_x,
         d_e=config.d_e,
         d_mlp=config.d_mlp,
         d_v=config.d_v,
-        num_layers=1,
+        num_layers=4,
         attn_heads=6,        
     )
-    variables_dtransformer = dtransfomer.init(jax.random.PRNGKey(0), x_ids) #jnp.ones((config.l_x, config.d_e)))
+    variables_dtransformer = dtransfomer.init(jax.random.PRNGKey(0), jnp.ones(config.l_max)) #x_ids) #jnp.ones((config.l_x, config.d_e)))
     returned = dtransfomer.apply(variables_dtransformer, x_ids) # NOTE: apply wraps the call (but a direct call throws an error...)
-    print(returned)
 
     # TODO: split tests
     returned = dtransfomer.infer(tokenizer=tokenizer, x=x, variables=variables_dtransformer)

@@ -2,14 +2,15 @@
 TODO: 
 - dependencies
 - jit where possible (e.g. for loops)
+- use logging
 
 """
-from dataclasses import dataclass
 from flax import linen as nn 
 import jax
 import jax.numpy as jnp
 from jax.nn import gelu
 import math
+import numpy as np
 from typing import Callable
 from ownGPT import own_tokenize, config
 from tokenizers import Tokenizer
@@ -23,45 +24,39 @@ class Attention(nn.Module):
     d_v: int        # dimension of value (d_mid or d_out in Phuong/Hutter)
 
     @nn.compact
-    def __call__(self, x, z):
+    def __call__(self, x: jnp.array, z: jnp.array):
         """ Compute attention for x, z.
-        Think of x as the current token and z the context token.
+        For concreteness assume that x, z are of shape (l_x, d_x), (l_z, d_z) where
+        l_x, d_x is the token length, embedding dimension respectively and similarly
+        for z.
 
-        Input: 
-        TODO: types?!?
-            - x, z: in the following assumed to be of shape (l_x, d_x), (l_z, d_z)
-            
-        Output:
-            - y: attention of shape (l_x, d_v)
+        Args: 
+            x: current (embedded) token
+            z: (embedded) context token
+
+        Returns:
+            attn: attention of shape (l_x, d_v)
         """ 
-        # QUERY
-        # l_x: typically token length
-        # input x: (l_x, d_x)
-        # operator: (d_x, d_attn) (features = number of cols)
-        # output q: (l_x, d_attn) (left mult with input x)
-        q = nn.Dense(features = self.d_attn)(x) # NOTE: contains bias by default
+        # operator of shape (d_x, d_attn) (features = number of cols)
+        # query of shape (l_x, d_attn)
+        # NOTE: always left multiply with input
+        query = nn.Dense(features = self.d_attn)(x) # NOTE: contains bias by default
 
-        # KEY
-        # l_z: typically token length
-        # input z (l_z, d_z)
-        # operator (d_z, d_attn)
-        # k (l_z, d_attn) (left mult with input z)
-        k = nn.Dense(features = self.d_attn)(z)
+        # operator of shape (d_z, d_attn)
+        # key of shape (l_z, d_attn)
+        key = nn.Dense(features = self.d_attn)(z)
 
-        # VALUE
-        # input z (l_z, d_z)
-        # operator (d_z, d_v)
-        # v (l_z, d_v)
-        v = nn.Dense(features = self.d_v)(z) # TODO: are these different operators? and are they "persistent" for training?
+        # operator of shape (d_z, d_v)
+        # value (l_z, d_v)
+        value = nn.Dense(features = self.d_v)(z) # TODO: are these different operators? and are they "persistent" for training?
         
-        # scores (l_x, l_z)
-        s = q @ jnp.transpose(k)
+        # scores of shape (l_x, l_z)
+        scores = query @ jnp.transpose(key)
 
         # TODO: masking
 
-        # attention (l_x, d_v)
-        y = jax.nn.softmax(s/math.sqrt(self.d_attn)) @ v 
-        return y
+        attn = jax.nn.softmax(scores/math.sqrt(self.d_attn)) @ value 
+        return attn
 
 
 class MHAttention(nn.Module):
@@ -73,7 +68,7 @@ class MHAttention(nn.Module):
                         # TODO: here necessary?
 
     def setup(self):
-        self.attns = [Attention(d_attn=self.d_attn, d_v=self.d_v) for idx in range(self.attn_heads)]
+        self.attns = [Attention(d_attn=self.d_attn, d_v=self.d_v) for _ in range(self.attn_heads)]
         self.w_out = nn.Dense(features=self.d_out)
 
     def __call__(self, x, z):
@@ -81,14 +76,14 @@ class MHAttention(nn.Module):
         for idx, attn in enumerate(self.attns):
             # TODO: how to do this better? E.g. using jit?!?
             y = y.at[: , idx: idx+self.d_v].set(attn(x, z))
-        w = self.w_out(y) #nn.Dense(features=config.attn_heads*config.d_mid)(y) # TODO: check: mult from right?
+        w = self.w_out(y) #nn.Dense(features=config.attn_heads*config.d_mid)(y)
         return w
 
 
 class DTransformerActivationLayer(nn.Module):
     d_mlp: int                          # "MLP dimension", see below (MLP: multi-layer perceptrons)
     d_e: int                            # embedding dimension
-    act_fn: Callable=jax.nn.gelu        # activation function (TODO: typing not very useful here...)
+    act_fn: Callable=jax.nn.gelu        # activation function
 
     def setup(self):
         self.mlp1 = nn.Dense(features=self.d_mlp)
@@ -174,7 +169,7 @@ class DTransformerBlock(nn.Module):
         for i in range(num_rows):
             # set i-th row to layer normalized i-th row of x
             x_normalized = x_normalized.at[i,:].set(self.layer_norm1(x[i,:]))
-            # use x_normalized for queries, keys and values
+        # use x_normalized for queries, keys and values
         x_mhattn = self.mhattention(x_normalized, x_normalized)        
         x = x.at[:,:].add(x + x_mhattn)
 
@@ -236,8 +231,6 @@ class DTransformer(nn.Module):
                         # TODO: determined by tokenizer?
     l_gen: int          # max generated sequence
     l_max: int          # max sequence length
-    l_x: int            # token length of input
-                        # TODO: how to avoid requiring this here?
     d_e: int            # word embedding dimension
     d_v: int
     d_mlp: int          # output dimension of "activation layers"
@@ -252,15 +245,17 @@ class DTransformer(nn.Module):
             l_max=self.l_max, 
             vocab_size=self.vocab_size
         )
-        self.dtransformer_block = DTransformerBlock(
-            d_e=self.d_e,
-            d_mlp=self.d_mlp,
-            d_attn=self.d_e,
-            d_v=self.d_v,
-            d_out=self.d_e, # that's at least typical...
-            attn_heads=self.attn_heads,
-            l_x=self.l_x #l_max
-        ) 
+        self.layers = [ 
+            DTransformerBlock(
+                d_e=self.d_e,
+                d_mlp=self.d_mlp,
+                d_attn=self.d_e,
+                d_v=self.d_v,
+                d_out=self.d_e, # that's at least typical...
+                attn_heads=self.attn_heads,
+                l_x=self.l_max)
+            for _ in range(self.num_layers) 
+        ]
         self.final_layer_norm = LayerNormalization()
         self.unembed   = TransformerUnembedding(vocab_size=self.vocab_size)
 
@@ -269,12 +264,12 @@ class DTransformer(nn.Module):
         #X = X.at[:,:].set(self.dtransformer_embed(X))
         # TODO: clean up!
         Y = self.dtransformer_embed(X)
-        Y = Y.at[:,:].set(self.dtransformer_block(Y))
+        for _, layer  in enumerate(self.layers):
+            Y = Y.at[:,:].set(layer(Y))
+
         num_rows = Y.shape[0]
         Y_normalized = jnp.zeros(Y.shape)
-
         for i in range(num_rows):
-            # set i-th row to layer normalized i-th row of x
             # TODO: refactor to matrix form?!
             Y_normalized = Y_normalized.at[i,:].set(self.final_layer_norm(Y[i,:]))
 
@@ -285,25 +280,40 @@ class DTransformer(nn.Module):
         x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
         # TODO: in Hutter/Phuong this call is in the following loop. But why?!
         len_x_ids = len(x_ids)
+        l_max = self.l_max
+        if self.l_max < len_x_ids:
+            x_ids = x_ids[len_x_ids-l_max:]
+        else:
+            x_ids = jnp.pad(x_ids, (0, self.l_max-len_x_ids)) 
+        #x_ids = jnp.pad(x_ids_unpadded, (0, self.l_max-len_x_ids))
         #y = jnp.zeros(shape=(len_x_ids + self.l_gen,))
         #y = y.at[:len_x_ids].set(x_ids)
         #variables = self.init(jax.random.PRNGKey(0), x_ids)
+        #P = jnp.zeros((len_x_ids, self.vocab_size)).astype("float64")
 
+        key = jax.random.PRNGKey(23)
         for i in range(self.l_gen):
-            # NOTE: we call the transformer in each iteration step
-            #variables = self.init(jax.random.PRNGKey(0), x_ids)
             # TODO: totally unclear: don't we "forget" our learnt parameters if we repeat the init step?
-            print(f"{i}: {x_ids[i:]}")
-            P = self.apply(variables, x_ids[i:]) 
-            #print(variables)
+            #variables = self.init(jax.random.PRNGKey(0), x_ids)
+            P = self.apply(variables, x_ids) 
+            # create new random key (otherwise always get same sample)
+            key, _ = jax.random.split(key) 
             new_token = jax.random.choice(
-                    key=jax.random.PRNGKey(0), 
+                    key=key,
                     a=self.vocab_size, 
-                    p=P[len_x_ids+i,:])
-            print(f"new: {new_token}")
-            x_ids = jnp.append(x_ids, new_token)
+                    p=P[len_x_ids+i,:]) #P[len_x_ids+i,:])
+            try:
+                x_ids = x_ids.at[len_x_ids+i].set(new_token)
+            except:
+                # TODO: this part does not yet seem to work as intended
+                # TODO: also: save new tokens somewhere else as well to avoid filling
+                # x_ids if l_gen > l_max?
+                x_ids = jnp.append(x_ids, new_token)
+                x_ids = x_ids[1:]
             #x_ids = x_ids.at[len_x_ids+i:].set(new_token)
             print(x_ids)
+            # create new random key (otherwise always get same sample)
+            key, _ = jax.random.split(key)
 
-        return tokenizer.decode(x_ids[len_x_ids:])
+        return tokenizer.decode(x_ids[len_x_ids:len_x_ids+self.l_gen])
 
