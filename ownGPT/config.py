@@ -28,5 +28,6 @@ vocab_size = 50304 # taken from nanoGPT
 
 # data paths
 cwd = Path(__file__).parents[1].resolve()
+data_path = cwd / Path("data")
 tokenize_path = cwd / Path("data/tokenize")
 tokens_path = cwd / Path("data/tokens")
