@@ -1,31 +1,34 @@
 """
 TODO: 
 - dependencies
-- jit where possible (e.g. for loops)
+- vmap/jit where possible (e.g. for loops)
 - use logging
+- type annotation
 
 """
-from flax import linen as nn
-from flax.training.train_state import TrainState
+import logging
+import math
+from pathlib import Path
+from typing import Callable
+
 import jax
 import jax.numpy as jnp
-from jax.nn import gelu
-import math
 import numpy as np
-from typing import Callable
-import own_tokenize, config
-from tokenizers import Tokenizer
-from pathlib import Path
 import optax
+import orbax.checkpoint
+from flax import linen as nn
+from flax.training import orbax_utils
+from flax.training.train_state import TrainState
+from jax.nn import gelu
+from tokenizers import Tokenizer
 
-# TODO: type annotation?!
-# TODO: refactor: make classes independent of config (pass as parameters)
+from ownGPT import config, own_tokenize
 
 
 class Attention(nn.Module):
     d_attn: int  # embedding dimension of key and query ("attention dimension")
     d_v: int  # dimension of value (d_mid or d_out in Phuong/Hutter)
-    unidrectional: bool = True  # decides if it attention is unidirectional or not
+    unidirectional: bool = True  # decides if it attention is unidirectional or not
 
     @nn.compact
     def __call__(self, x: jnp.ndarray, z: jnp.ndarray):
@@ -35,36 +38,37 @@ class Attention(nn.Module):
         for z.
 
         Args:
-            x: current (embedded) token
-            z: (embedded) context token
+            x: current token (embedded)
+            z: context token (embedded)
 
         Returns:
             attn: attention of shape (l_x, d_v)
         """
         # operator of shape (d_x, d_attn) (features = number of cols)
-        # query of shape (l_x, d_attn)
-        # NOTE: always left multiply with input
-        query = nn.Dense(features=self.d_attn)(x)  # NOTE: contains bias by default
+        # query of shape (l_x, d_attn) NOTE: always left multiply with input
+        query = nn.Dense(features=self.d_attn)(x)  # contains bias by default
 
         # operator of shape (d_z, d_attn)
         # key of shape (l_z, d_attn)
         key = nn.Dense(features=self.d_attn)(z)
 
         # operator of shape (d_z, d_v)
-        # value (l_z, d_v)
-        value = nn.Dense(features=self.d_v)(
-            z
-        )  # TODO: are these different operators? and are they "persistent" for training?
+        # value of shape (l_z, d_v)
+        value = nn.Dense(features=self.d_v)(z)
 
         # scores of shape (l_x, l_z)
         scores = query @ jnp.transpose(key)
 
         # masking
-        if self.unidrectional:
+        # TODO: how to vectorize?
+        if self.unidirectional:
             rows = scores.shape[0]
-            # need to set lower triangle -> k=-1
-            indices = jnp.tril_indices(rows, k=-1)
-            scores = scores.at[indices].set(-jnp.inf)
+            cols = scores.shape[1]
+            for row in range(rows):
+                for col in range(cols):
+                    # this is a bit subtle compared to Hutter/Phuong because of transposed arrays
+                    if row < col:
+                        scores = scores.at[row, col].set(-jnp.inf)
 
         attn = jax.nn.softmax(scores / math.sqrt(self.d_attn)) @ value
         return attn
@@ -76,11 +80,11 @@ class MHAttention(nn.Module):
     d_out: int  # output dimension
     attn_heads: int  # number of heads
     l_x: int  # token length
-    # TODO: here necessary?
 
     def setup(self):
         self.attns = [
-            Attention(d_attn=self.d_attn, d_v=self.d_v) for _ in range(self.attn_heads)
+            Attention(d_attn=self.d_attn, d_v=self.d_v, unidirectional=True)
+            for _ in range(self.attn_heads)
         ]
         self.w_out = nn.Dense(features=self.d_out)
 
@@ -88,7 +92,9 @@ class MHAttention(nn.Module):
         y = jnp.zeros((self.l_x, self.attn_heads * self.d_v))
         for idx, attn in enumerate(self.attns):
             # TODO: how to do this better? E.g. using jit?!?
-            y = y.at[:, idx : idx + self.d_v].set(attn(x, z))
+            attention = attn(x, z)
+            y = y.at[:, idx : idx + self.d_v].set(attention)
+        # TODO: bias correct (cf. Hutter/Phuong)?
         w = self.w_out(y)  # nn.Dense(features=config.attn_heads*config.d_mid)(y)
         return w
 
@@ -103,56 +109,41 @@ class DTransformerActivationLayer(nn.Module):
         self.mlp2 = nn.Dense(features=self.d_e)
 
     def __call__(self, x):
-        """
-        Input:
-            - x of shape, say (l, d_e)
-
-        Output:
-            - 'activated' x of shape (l, d_e)
-        """
         return x + self.mlp2(self.act_fn(self.mlp1(x)))
 
 
 class LayerNormalization(nn.Module):
     offset: bool = True  # decides if we include a learnable offset/bias
-    translation_by_mean: bool = (
-        True  # decides if we translate the input by its (broadcasted) mean
-    )
-    # NOTE: if both are false, one speaks of root mean square layer normalization
-    # TODO: what about row-wise layer normalization?
 
-    # def setup(self):
-    #    self.gamma = self.param('gamma', nn.initializers.normal(), e.shape)
+    # TODO: row-wise layer normalization?
 
     @nn.compact
     def __call__(self, e):
-        mean = 1
-        if self.translation_by_mean:
+        @jax.jit
+        def norm(e):
             mean = jnp.mean(e)
-        scale = jnp.std(e)
-        if scale == 0:
-            scale = 1
+            scale = jnp.std(e)
+            # if scale == 0: # TODO: do not treat scale == 0 here because to make jit work
+            #    scale = 1
+            return (e - mean) / scale
 
         # learnable parameters
-        # (found it more transparent to spell this out)
         # TODO: is normal initialization a good choice here?
         gamma = self.param("gamma", nn.initializers.normal(), e.shape)
         if self.offset:
             beta = self.param("beta", nn.initializers.normal(), e.shape)
-
-        return gamma * ((e - mean) / scale) + beta
+        return gamma * (norm(e)) + beta
 
 
 class DTransformerBlock(nn.Module):
-    # TODO: how to make this cleaner? need so many attributes? many create MHAttention from the other params?
+    """See Algorithm 10 (DTransformer) in Hutter/Phuong"""
     d_e: int  # word embedding dimension
     d_mlp: int  # output dimension of "activation layers"
     d_attn: int  # embedding dimension of key and query ("attention dimension")
     d_v: int  # dimension of value (d_mid or d_out in Phuong/Hutter)
     d_out: int  # output dimension;
-    # TODO: typically the embedding dimension?!
     attn_heads: int  # number of heads
-    l_x: int  # token length TODO: necessary?
+    l_x: int  # token length
 
     def setup(self):
         self.act_layer = DTransformerActivationLayer(d_mlp=self.d_mlp, d_e=self.d_e)
@@ -177,17 +168,16 @@ class DTransformerBlock(nn.Module):
         num_rows = x.shape[0]
         # num_cols = x.shape[1]
         x_normalized = jnp.zeros(x.shape)
-        # TODO: extract this part or do in matrix form?
+        # TODO: extract this part or do in matrix form? jit?
         for i in range(num_rows):
-            # set i-th row to layer normalized i-th row of x
             x_normalized = x_normalized.at[i, :].set(self.layer_norm1(x[i, :]))
-        # use x_normalized for queries, keys and values
         x_mhattn = self.mhattention(x_normalized, x_normalized)
-        x = x.at[:, :].add(x + x_mhattn)
+        x = x + x_mhattn
 
+        # TODO: here seems to be an issue...
         for i in range(num_rows):
             x_normalized = x_normalized.at[i, :].set(self.layer_norm2(x[i, :]))
-        x = x.at[:, :].add(self.act_layer(x_normalized))
+        x = x + self.act_layer(x_normalized)
 
         return x
 
@@ -252,7 +242,6 @@ class DTransformer(nn.Module):
     # dtransformer_block: DTransformerBlock
 
     def setup(self):
-        # TODO: add assert l_max >= l_x
         self.dtransformer_embed = DTransformerEmbedding(
             d_e=self.d_e, l_max=self.l_max, vocab_size=self.vocab_size
         )
@@ -274,19 +263,27 @@ class DTransformer(nn.Module):
     def __call__(self, X: jnp.ndarray):
         # X = X.at[:,:].set(self.dtransformer_embed(X))
         # TODO: clean up!
-        Y = self.dtransformer_embed(X)
+        Y = X
+        Y = self.dtransformer_embed(Y)
         for _, layer in enumerate(self.layers):
-            Y = Y.at[:, :].set(layer(Y))
+            Y = layer(Y)
 
         num_rows = Y.shape[0]
-        Y_normalized = jnp.zeros(Y.shape)
+        # Y_normalized = jnp.zeros(Y.shape)
         for i in range(num_rows):
             # TODO: refactor to matrix form?!
-            Y_normalized = Y_normalized.at[i, :].set(self.final_layer_norm(Y[i, :]))
+            Y = Y.at[i, :].set(self.final_layer_norm(Y[i, :]))
 
-        return self.unembed(Y_normalized)
+        return self.unembed(Y)
 
-    def infer(self, tokenizer: Tokenizer, x: str, l_gen: int, variables):
+    def infer(
+        self,
+        tokenizer: Tokenizer,
+        x: str,
+        l_gen: int,
+        variables,
+        temperature: float = 1.0,
+    ):
         # TODO: add variables before calling?
         x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
         len_x_ids = len(x_ids)
@@ -307,10 +304,10 @@ class DTransformer(nn.Module):
         generated_tokens = jnp.zeros(l_gen, dtype=int)
 
         key = jax.random.PRNGKey(23)
+        P = self.apply(variables, y_ids)
+
         for i in range(l_gen):
-            # TODO: totally unclear: don't we "forget" our learnt parameters if we repeat the init step?
-            # variables = self.init(jax.random.PRNGKey(0), x_ids)
-            P = self.apply(variables, y_ids)
+            P = P.at[:, :].set(self.apply(variables, y_ids))
 
             # dealing with indices
             if start_idx + i >= l_max - 1:
@@ -320,8 +317,10 @@ class DTransformer(nn.Module):
 
             # create new random key (otherwise always get same sample)
             key, _ = jax.random.split(key)
-            # TODO: add temperature
-            new_token = jax.random.choice(key=key, a=self.vocab_size, p=P[p_idx, :])
+            p = jax.nn.softmax(P[p_idx, :] / temperature)
+            print(p)
+            new_token = jax.random.choice(key=key, a=self.vocab_size, p=p)
+            print(f"max index: {jnp.argmax(P[p_idx, :])}, p_idx: {p_idx}")
 
             if p_idx >= l_max - 1:
                 # TODO: fix that...
@@ -378,9 +377,9 @@ def train_step(state: TrainState, sample: jnp.ndarray):
         loss = cross_entropy(prob_distr=P, sample=sample)
         return loss
 
-    grad_fn = jax.value_and_grad(loss_fn) #, has_aux=True)
+    grad_fn = jax.value_and_grad(loss_fn)  # , has_aux=True)
     loss, grads = grad_fn(state.params)
-    print(f"Loss: {loss}")
+    # print(f"Loss: {loss}")
     new_state = state.apply_gradients(grads=grads)
 
     return new_state, loss  # TODO: does the state store the new params?!?
@@ -420,7 +419,9 @@ if __name__ == "__main__":
     vocab_size = tokenizer.get_vocab_size()
 
     # TODO: how to improve?
-    train_data = jnp.array(own_tokenize.encode_file(tokenizer, train_set).ids)
+    train_data = jnp.array(
+        own_tokenize.encode_file(tokenizer, train_set, limit=500).ids
+    )
     optimizer = optax.adam(learning_rate=1e-2)
 
     model = DTransformer(
@@ -438,5 +439,16 @@ if __name__ == "__main__":
         apply_fn=model.apply, params=init_vars["params"], tx=optimizer
     )
 
-    new_state = train(state=state, train_data=train_data, l_max=config.l_max, epochs=5000)
+    # train
+    epochs = 5
+    train_meta_data = {"epochs": epochs, "train set": "Tolstoy_WarAndPeace_orig.txt"}
+    new_state = train(
+        state=state, train_data=train_data, l_max=config.l_max, epochs=epochs
+    )
+    ckpt = {"model": new_state, "train_meta_data": train_meta_data}
 
+    # store
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    save_args = orbax_utils.save_args_from_target(ckpt)  # mainly for speedup
+    orbax_checkpointer.save("../models/test", ckpt, save_args=save_args)
+    print("Model saved")
