@@ -4,6 +4,7 @@ from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
+#from ownGPT import config
 import config
 from typing import List
 
@@ -52,9 +53,13 @@ def load_BPE_tokenizer(tokens_file: Path, postprocess: bool = True) -> Tokenizer
     return tokenizer
 
 
-def encode_file(tokenizer: Tokenizer, file: Path) -> str:
+def encode_file(tokenizer: Tokenizer, file: Path , limit: int=None) -> str:
     with open(file, 'r') as f: # TODO: 'rb'?
         text = f.read()
+    if limit:
+        if limit > len(text) - 1:
+            limit = len(text) - 1
+        text = text[:limit]
     return tokenizer.encode(text)
 
 
@@ -62,6 +67,6 @@ def encode_file(tokenizer: Tokenizer, file: Path) -> str:
 
 
 # NOTE: need conversion to string because of PyString (used in C++ extensions?!?) maybe change above
-file_path = [str(file) for file in config.tokenize_path.glob("*.txt")]
-tokenizer = train_BPE_tokenizer(file_path, tokens_save_path=str(config.tokens_path / Path("test_tokens.json")))
-print(tokenizer.encode("Hello, my lord!", "How is it going?").ids)
+#file_path = [str(file) for file in config.tokenize_path.glob("*.txt")]
+#tokenizer = train_BPE_tokenizer(file_path, tokens_save_path=str(config.tokens_path / Path("test_tokens.json")))
+#print(tokenizer.encode("Hello, my lord!", "How is it going?").ids)
