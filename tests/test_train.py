@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -7,19 +8,19 @@ import pytest
 from ownGPT import config, model, own_tokenize, train
 
 
+@dataclass
 class Cfg:
     # parameters for models/checkpoint
-    d_attn = 124
-    d_e = 2  # 768 #256
-    d_mlp = 768  # TODO: which choice?
-    d_x = 32  # current token
-    d_z = 64  # context token
-    d_v = 128
-    d_out = 256  # output dim
-    vocab_size = 50304 
-    l_x = 12  # 16
-    l_z = 16
-    l_max = 32  # 1024
+    d_attn: int = 124
+    d_e: int = 2  # 768 #256
+    d_mlp: int = 768  # TODO: which choice?
+    d_v: int = 128
+    d_out: int = 256  # output dim
+    vocab_size: int = 50304
+    l_x: int = 12  # 16
+    l_z: int = 16
+    l_max: int = 32  # 1024
+
 
 @pytest.fixture
 def cfg_train():

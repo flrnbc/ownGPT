@@ -1,4 +1,4 @@
-from ownGPT import own_tokenize, config
+from ownGPT import own_tokenize
 import jax.numpy as jnp
 from pathlib import Path
 import pytest

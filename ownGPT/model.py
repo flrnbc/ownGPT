@@ -38,7 +38,7 @@ class Attention(nn.Module):
         Returns:
             attn: attention of shape (l_x, d_v)
         """
-        # operator of shape (d_x, d_attn) (features = number of cols)
+        # operator of shape (d_x, d_attn) (features = number of cols = output dimension)
         # query of shape (l_x, d_attn) NOTE: always left multiply with input
         query = nn.Dense(features=self.d_attn)(x)  # contains bias by default
 
@@ -85,11 +85,11 @@ class MHAttention(nn.Module):
     def __call__(self, x, z):
         y = jnp.zeros((self.l_x, self.attn_heads * self.d_v))
         for idx, attn in enumerate(self.attns):
-            # TODO: how to do this better? E.g. using jit?!?
+            # TODO: how to do this better? E.g. using matrix form?
             attention = attn(x, z)
             y = y.at[:, idx : idx + self.d_v].set(attention)
-        # TODO: bias correct (cf. Hutter/Phuong)?
-        w = self.w_out(y)  # nn.Dense(features=config.attn_heads*config.d_mid)(y)
+        # TODO: is bias correct (cf. Hutter/Phuong)?
+        w = self.w_out(y)
         return w
 
 
@@ -169,7 +169,6 @@ class DTransformerBlock(nn.Module):
         x_mhattn = self.mhattention(x_normalized, x_normalized)
         x = x + x_mhattn
 
-        # TODO: here seems to be an issue...
         for i in range(num_rows):
             x_normalized = x_normalized.at[i, :].set(self.layer_norm2(x[i, :]))
         x = x + self.act_layer(x_normalized)
@@ -182,7 +181,7 @@ class DTransformerEmbedding(nn.Module):
     Class to preprocess strings before feeding them into a Transformer model.
     """
 
-    d_e: int  # word embedding dimension
+    d_e: int  # word/positional embedding dimension
     l_max: int  # maximal token length
     vocab_size: int  # TODO: can read from tokens_file?!?
 
@@ -195,7 +194,6 @@ class DTransformerEmbedding(nn.Module):
         # TODO: actually assume that x is a jnp.ndarray with int entries
         X = jnp.zeros(shape=(x.size, self.d_e))
         x_int = x.astype(int)  # just to be sure
-        # TODO: need int32?
 
         # note that we embed all possible positions even though len(x) might be less
         x_enum = jnp.array([i for i in range(self.l_max)], dtype=int)
@@ -245,7 +243,7 @@ class DTransformer(nn.Module):
                 d_mlp=self.d_mlp,
                 d_attn=self.d_e,
                 d_v=self.d_v,
-                d_out=self.d_e,  # that's at least typical...
+                d_out=self.d_e,  # TODO: good choice?
                 attn_heads=self.attn_heads,
                 l_x=self.l_max,
             )

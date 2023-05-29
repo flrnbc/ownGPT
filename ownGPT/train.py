@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import optax
@@ -5,11 +7,9 @@ import orbax.checkpoint
 from flax import linen as nn
 from flax.training import orbax_utils
 from flax.training.train_state import TrainState
-import own_tokenize
-from own_tokenize import Tokenizer
-import model
-from pathlib import Path
-import config
+
+#from own_tokenize import Tokenizer
+from ownGPT import config, model, own_tokenize
 
 
 @jax.jit
@@ -72,7 +72,7 @@ def train(
     for _ in range(epochs):
         for i in range(sample_size):
             # TODO: check training!
-            state, loss = train_step(state=state, sample=train_data[i : l_max + i])
+            state, loss = train_step(state=state, sample=train_data[i : l_max + i - 1])
             if i % 100 == 0:
                 print(f"step {i}, loss: {loss}")
 
@@ -120,8 +120,8 @@ def train_dtransformer(
 
 
 if __name__ == "__main__":
-    train_set = Path(config.data_path / "Tolstoy_WarAndPeace_orig.txt")
-    save_path = Path(config.models_path / "test")
-    train_dtransformer(train_set=train_set, epochs=5, save_path=save_path, limit=200)
+    train_set = Path(config.data_path) / Path("tokenize/Tolstoy_WarAndPeace.txt")
+    save_path = Path(config.models_path / "first")
+    train_dtransformer(train_set=train_set, epochs=1, save_path=save_path, limit=500)
 # tokenizer = own_tokenize.train_BPE_tokenizer([str(train_set)])
 # vocab_size = tokenizer.get_vocab_size()
