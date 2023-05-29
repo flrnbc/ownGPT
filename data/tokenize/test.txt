@@ -1,0 +1,5 @@
+Here we just have a small test text file with a very limited vocabulary. 
+I'm curious how the tokens will actually look like. I hope it doesn't show that my English vocabulary is very shallow and I do not know the language.
+But let's see maybe I already picked up a lot of words in kindergarten.
+
+Let's start another paragraph to see how the tokenizer handles it.
