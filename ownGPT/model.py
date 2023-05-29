@@ -14,15 +14,9 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
-import orbax.checkpoint
 from flax import linen as nn
-from flax.training import orbax_utils
-from flax.training.train_state import TrainState
 from jax.nn import gelu
 from tokenizers import Tokenizer
-
-from ownGPT import config, own_tokenize
 
 
 class Attention(nn.Module):
@@ -137,6 +131,7 @@ class LayerNormalization(nn.Module):
 
 class DTransformerBlock(nn.Module):
     """See Algorithm 10 (DTransformer) in Hutter/Phuong"""
+
     d_e: int  # word embedding dimension
     d_mlp: int  # output dimension of "activation layers"
     d_attn: int  # embedding dimension of key and query ("attention dimension")
@@ -188,7 +183,7 @@ class DTransformerEmbedding(nn.Module):
     """
 
     d_e: int  # word embedding dimension
-    l_max: int
+    l_max: int  # maximal token length
     vocab_size: int  # TODO: can read from tokens_file?!?
 
     def setup(self):
@@ -239,7 +234,6 @@ class DTransformer(nn.Module):
     d_mlp: int  # output dimension of "activation layers"
     num_layers: int  # number of layers
     attn_heads: int  # number of attention heads in each layer
-    # dtransformer_block: DTransformerBlock
 
     def setup(self):
         self.dtransformer_embed = DTransformerEmbedding(
@@ -261,20 +255,16 @@ class DTransformer(nn.Module):
         self.unembed = TransformerUnembedding(vocab_size=self.vocab_size)
 
     def __call__(self, X: jnp.ndarray):
-        # X = X.at[:,:].set(self.dtransformer_embed(X))
-        # TODO: clean up!
-        Y = X
-        Y = self.dtransformer_embed(Y)
+        X = self.dtransformer_embed(X)
         for _, layer in enumerate(self.layers):
-            Y = layer(Y)
+            X = layer(X)
 
-        num_rows = Y.shape[0]
-        # Y_normalized = jnp.zeros(Y.shape)
+        num_rows = X.shape[0]
         for i in range(num_rows):
-            # TODO: refactor to matrix form?!
-            Y = Y.at[i, :].set(self.final_layer_norm(Y[i, :]))
+            # TODO: again refactor to matrix form?! jit?
+            X = X.at[i, :].set(self.final_layer_norm(X[i, :]))
 
-        return self.unembed(Y)
+        return self.unembed(X)
 
     def infer(
         self,
@@ -284,12 +274,10 @@ class DTransformer(nn.Module):
         variables,
         temperature: float = 1.0,
     ):
-        # TODO: add variables before calling?
         x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
         len_x_ids = len(x_ids)
 
         # pad/slice x_ids so that it is of length l_max
-        # TODO: y_ids really needed?
         l_max = self.l_max
         if self.l_max < len_x_ids:
             y_ids = x_ids[len_x_ids - l_max :]
@@ -304,11 +292,10 @@ class DTransformer(nn.Module):
         generated_tokens = jnp.zeros(l_gen, dtype=int)
 
         key = jax.random.PRNGKey(23)
-        P = self.apply(variables, y_ids)
+        # P = self.apply(variables, y_ids)
 
         for i in range(l_gen):
-            P = P.at[:, :].set(self.apply(variables, y_ids))
-
+            P = self.apply(variables, y_ids)
             # dealing with indices
             if start_idx + i >= l_max - 1:
                 p_idx = l_max - 1
@@ -318,9 +305,9 @@ class DTransformer(nn.Module):
             # create new random key (otherwise always get same sample)
             key, _ = jax.random.split(key)
             p = jax.nn.softmax(P[p_idx, :] / temperature)
-            print(p)
+            # print(p)
             new_token = jax.random.choice(key=key, a=self.vocab_size, p=p)
-            print(f"max index: {jnp.argmax(P[p_idx, :])}, p_idx: {p_idx}")
+            # print(f"max index: {jnp.argmax(P[p_idx, :])}, p_idx: {p_idx}")
 
             if p_idx >= l_max - 1:
                 # TODO: fix that...
@@ -328,127 +315,8 @@ class DTransformer(nn.Module):
                 y_ids = y_ids.at[:].set(z_ids[1:])
             else:
                 y_ids = y_ids.at[p_idx].set(new_token)
-            # except:
-            # TODO: this part does not yet seem to work as intended
-            # TODO: also: save new tokens somewhere else as well to avoid filling
-            # x_ids if l_gen > l_max?
-            # TODO: needs to be improved...
-            # z_ids = jnp.append(y_ids, new_token)
-            # y_ids = y_ids.at[:].set(z_ids[1:])
-            # x_ids = x_ids.at[len_x_ids+i:].set(new_token)
 
             print(y_ids)
             generated_tokens = generated_tokens.at[i].set(new_token)
 
-            # create new random key (otherwise always get same sample)
-            key, _ = jax.random.split(key)
-
         return tokenizer.decode(generated_tokens)
-
-
-def cross_entropy(prob_distr: jnp.ndarray, sample: jnp.ndarray):
-    # TODO: vectorize?
-    loss = 0.0
-    cols = sample.size  # TODO: add check that it's a row vector
-    for i in range(cols - 1):
-        loss -= jnp.log(prob_distr[i, sample[i + 1]])
-    return loss
-
-
-# the following is the spelt out version of TrainState
-# def update_step(tx, apply_fn, sample, opt_state, params, state):
-#     def loss(params):
-#         P, updated_state = apply_fn({'params': params, **state},
-#                                    sample, mutable=list(state.keys()))
-#         l = cross_entropy(prob_distr=P, sample=sample)
-#         return l, updated_state
-
-#     (l, state), grads = jax.value_and_grad(loss, has_aux=True)(params)
-#     updates, opt_state = tx.update(grads, opt_state)
-#     params = optax.apply_updates(params, updates)
-#     return opt_state, params, state
-
-
-def train_step(state: TrainState, sample: jnp.ndarray):
-    # TODO: no optimizer?
-
-    def loss_fn(params):  # sample is implicit
-        P = state.apply_fn({"params": params}, sample)
-        loss = cross_entropy(prob_distr=P, sample=sample)
-        return loss
-
-    grad_fn = jax.value_and_grad(loss_fn)  # , has_aux=True)
-    loss, grads = grad_fn(state.params)
-    # print(f"Loss: {loss}")
-    new_state = state.apply_gradients(grads=grads)
-
-    return new_state, loss  # TODO: does the state store the new params?!?
-
-
-# NOTE: one key point of jax seems to be the 'decoupling' of the state and the model
-# for example, we only train the state and the model only goes into the state via the
-# apply_fn!
-
-
-def train(
-    state,
-    train_data,
-    l_max,
-    # optimizer,
-    epochs: int,
-):
-    assert len(train_data) > l_max, "Training data not long enough."  # TODO: necessary?
-    sample_size = len(train_data) - l_max
-
-    # init_vars = model.init(jax.random.PRNGKey(42), jnp.ones(config.l_max))
-    # tx = optax.adamw(learning_rate=learning_rate) # TODO: add more parameters?!?
-    # state = TrainState.create(apply_fn=model.apply, params=init_vars["params"], tx=optimizer)
-
-    for _ in range(epochs):
-        for i in range(sample_size):
-            state, loss = train_step(state=state, sample=train_data[i : l_max + i])
-            if i % 100 == 0:
-                print(f"step {i}, loss: {loss}")
-
-    return state
-
-
-if __name__ == "__main__":
-    train_set = config.data_path / "Tolstoy_WarAndPeace_orig.txt"
-    tokenizer = own_tokenize.train_BPE_tokenizer([str(train_set)])
-    vocab_size = tokenizer.get_vocab_size()
-
-    # TODO: how to improve?
-    train_data = jnp.array(
-        own_tokenize.encode_file(tokenizer, train_set, limit=500).ids
-    )
-    optimizer = optax.adam(learning_rate=1e-2)
-
-    model = DTransformer(
-        vocab_size=vocab_size,
-        l_max=config.l_max,
-        d_e=config.d_e,
-        d_mlp=config.d_mlp,
-        d_v=config.d_v,
-        num_layers=6,
-        attn_heads=8,
-    )
-
-    init_vars = model.init(jax.random.PRNGKey(42), jnp.ones(config.l_max))
-    state = TrainState.create(
-        apply_fn=model.apply, params=init_vars["params"], tx=optimizer
-    )
-
-    # train
-    epochs = 5
-    train_meta_data = {"epochs": epochs, "train set": "Tolstoy_WarAndPeace_orig.txt"}
-    new_state = train(
-        state=state, train_data=train_data, l_max=config.l_max, epochs=epochs
-    )
-    ckpt = {"model": new_state, "train_meta_data": train_meta_data}
-
-    # store
-    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    save_args = orbax_utils.save_args_from_target(ckpt)  # mainly for speedup
-    orbax_checkpointer.save("../models/test", ckpt, save_args=save_args)
-    print("Model saved")
