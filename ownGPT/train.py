@@ -122,6 +122,6 @@ def train_dtransformer(
 if __name__ == "__main__":
     train_set = Path(config.data_path) / Path("tokenize/Tolstoy_WarAndPeace.txt")
     save_path = Path(config.models_path / "first")
-    train_dtransformer(train_set=train_set, epochs=1, save_path=save_path, limit=500)
+    train_dtransformer(train_set=train_set, epochs=10, save_path=save_path)
 # tokenizer = own_tokenize.train_BPE_tokenizer([str(train_set)])
 # vocab_size = tokenizer.get_vocab_size()
