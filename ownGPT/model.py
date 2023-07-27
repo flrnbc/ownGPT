@@ -54,15 +54,9 @@ class Attention(nn.Module):
         scores = query @ jnp.transpose(key)
 
         # masking
-        # TODO: how to vectorize?
         if self.unidirectional:
-            rows = scores.shape[0]
-            cols = scores.shape[1]
-            for row in range(rows):
-                for col in range(cols):
-                    # this is a bit subtle compared to Hutter/Phuong because of transposed arrays
-                    if row < col:
-                        scores = scores.at[row, col].set(-jnp.inf)
+            mask = jnp.tril(jnp.ones(scores.shape))
+            scores = jnp.where(mask, scores, -jnp.inf)
 
         attn = jax.nn.softmax(scores / math.sqrt(self.d_attn)) @ value
         return attn
