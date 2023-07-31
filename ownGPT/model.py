@@ -70,21 +70,16 @@ class MHAttention(nn.Module):
     l_x: int  # token length
 
     def setup(self):
-        self.attns = [
+        # TODO: ordering unimportant?
+        self.heads = [
             Attention(d_attn=self.d_attn, d_v=self.d_v, unidirectional=True)
             for _ in range(self.attn_heads)
         ]
         self.w_out = nn.Dense(features=self.d_out)
 
     def __call__(self, x, z):
-        y = jnp.zeros((self.l_x, self.attn_heads * self.d_v))
-        for idx, attn in enumerate(self.attns):
-            # TODO: how to do this better? E.g. using matrix form?
-            attention = attn(x, z)
-            y = y.at[:, idx : idx + self.d_v].set(attention)
-        # TODO: is bias correct (cf. Hutter/Phuong)?
-        w = self.w_out(y)
-        return w
+        y = jnp.concatenate([head(x, z) for head in self.heads], axis=-1)
+        return self.w_out(y)
 
 
 class DTransformerActivationLayer(nn.Module):
@@ -160,19 +155,17 @@ class DTransformerBlock(nn.Module):
         # TODO: extract this part or do in matrix form? jit?
         for i in range(num_rows):
             x_normalized = x_normalized.at[i, :].set(self.layer_norm1(x[i, :]))
-        x_mhattn = self.mhattention(x_normalized, x_normalized)
-        x = x + x_mhattn
+        x = x + self.mhattention(x_normalized, x_normalized)
 
         for i in range(num_rows):
             x_normalized = x_normalized.at[i, :].set(self.layer_norm2(x[i, :]))
-        x = x + self.act_layer(x_normalized)
-
-        return x
+        return x + self.act_layer(x_normalized)
 
 
 class DTransformerEmbedding(nn.Module):
     """
-    Class to preprocess strings before feeding them into a Transformer model.
+    Class to preprocess strings before feeding them into a DTransformer model 
+    (Algorithm 10 in [PH])
     """
 
     d_e: int  # word/positional embedding dimension
@@ -181,40 +174,34 @@ class DTransformerEmbedding(nn.Module):
 
     def setup(self):
         self.word_embed = nn.Embed(num_embeddings=self.vocab_size, features=self.d_e)
-        # TODO: add assert l_max >= length(x)?
         self.pos_embed = nn.Embed(num_embeddings=self.l_max, features=self.d_e)
 
     def __call__(self, x: jnp.ndarray):
-        # TODO: actually assume that x is a jnp.ndarray with int entries
-        X = jnp.zeros(shape=(x.size, self.d_e))
-        x_int = x.astype(int)  # just to be sure
+        assert self.l_max >= x.size
+        x = x.astype(int) 
 
         # note that we embed all possible positions even though len(x) might be less
-        x_enum = jnp.array([i for i in range(self.l_max)], dtype=int)
-        x_pembed = self.pos_embed(x_enum)
-        x_wembed = self.word_embed(x_int)
-
-        # NOTE: the following line does not work because the shapes might be differnt (unless len(x)=l_max)
-        # X = X.at[:,:].add(x_wembed + x_pembed)
-
-        for i in range(x.size):
-            #    print(type(x))
-            #    print(type(x[i]))
-            X = X.at[i, :].set(x_wembed[i, :] + x_pembed[i, :])
-
-        return X
+        x_wembed = self.word_embed(x)
+        # it seems as if we only need the matrix instead of pos_embed(x) 
+        # the latter is just used to access the variables at all
+        # TODO: is there a better way?
+        x_pembed = self.pos_embed(x) 
+        pembed = self.pos_embed.variables['params']['embedding']
+        
+        return x_wembed[:x.size, :] + pembed[:x.size, :]
 
 
 class TransformerUnembedding(nn.Module):
-    """Turn result of Transformer blocks into probabilities"""
+    """Turn result of Transformer blocks into probabilities
+    This is Algorithm 7 in Phuong-Hutter.
+    """
 
     vocab_size: int
 
-    def setup(self):
-        self.lin_layer = nn.Dense(features=self.vocab_size)
-
+    @nn.compact
     def __call__(self, x: jnp.ndarray):
-        return jax.nn.softmax(self.lin_layer(x))
+        lin_layer = nn.Dense(features=self.vocab_size, use_bias=False)
+        return jax.nn.softmax(lin_layer(x))
 
 
 class DTransformer(nn.Module):
@@ -246,17 +233,16 @@ class DTransformer(nn.Module):
         self.final_layer_norm = LayerNormalization()
         self.unembed = TransformerUnembedding(vocab_size=self.vocab_size)
 
-    def __call__(self, X: jnp.ndarray):
-        X = self.dtransformer_embed(X)
+    def __call__(self, x: jnp.ndarray):
+        x = self.dtransformer_embed(x)
         for _, layer in enumerate(self.layers):
-            X = layer(X)
+            x = layer(x)
 
-        num_rows = X.shape[0]
-        for i in range(num_rows):
+        for i in range(x.shape[0]):
             # TODO: again refactor to matrix form?! jit?
-            X = X.at[i, :].set(self.final_layer_norm(X[i, :]))
+            x = x.at[i, :].set(self.final_layer_norm(x[i, :]))
 
-        return self.unembed(X)
+        return self.unembed(x)
 
     def infer(
         self,
