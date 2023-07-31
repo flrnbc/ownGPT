@@ -67,7 +67,6 @@ class MHAttention(nn.Module):
     d_v: int  # dimension of value (d_mid or d_out in Phuong/Hutter)
     d_out: int  # output dimension
     attn_heads: int  # number of heads
-    l_x: int  # token length
 
     def setup(self):
         # TODO: ordering unimportant?
@@ -103,9 +102,10 @@ class LayerNormalization(nn.Module):
     @nn.compact
     def __call__(self, e):
         @jax.jit
-        def norm(e):
-            mean = jnp.mean(e)
-            scale = jnp.std(e)
+        def normalization(e):
+            # normalize along last axis
+            mean = jnp.mean(e, axis=-1, keepdims=True)
+            scale = jnp.std(e, axis=-1, keepdims=True)
             # if scale == 0: # TODO: do not treat scale == 0 here because to make jit work
             #    scale = 1
             return (e - mean) / scale
@@ -115,7 +115,7 @@ class LayerNormalization(nn.Module):
         gamma = self.param("gamma", nn.initializers.normal(), e.shape)
         if self.offset:
             beta = self.param("beta", nn.initializers.normal(), e.shape)
-        return gamma * (norm(e)) + beta
+        return gamma * (normalization(e)) + beta
 
 
 class DTransformerBlock(nn.Module):
@@ -125,9 +125,8 @@ class DTransformerBlock(nn.Module):
     d_mlp: int  # output dimension of "activation layers"
     d_attn: int  # embedding dimension of key and query ("attention dimension")
     d_v: int  # dimension of value (d_mid or d_out in Phuong/Hutter)
-    d_out: int  # output dimension;
+    d_out: int  # output dimension
     attn_heads: int  # number of heads
-    l_x: int  # token length
 
     def setup(self):
         self.act_layer = DTransformerActivationLayer(d_mlp=self.d_mlp, d_e=self.d_e)
@@ -139,7 +138,6 @@ class DTransformerBlock(nn.Module):
             d_v=self.d_v,
             d_out=self.d_out,
             attn_heads=self.attn_heads,
-            l_x=self.l_x,
         )
 
     def __call__(self, x):
@@ -149,22 +147,14 @@ class DTransformerBlock(nn.Module):
                 of the tokens
         TODO: check for dimension?
         """
-        num_rows = x.shape[0]
-        # num_cols = x.shape[1]
-        x_normalized = jnp.zeros(x.shape)
-        # TODO: extract this part or do in matrix form? jit?
-        for i in range(num_rows):
-            x_normalized = x_normalized.at[i, :].set(self.layer_norm1(x[i, :]))
+        x_normalized = self.layer_norm1(x)
         x = x + self.mhattention(x_normalized, x_normalized)
-
-        for i in range(num_rows):
-            x_normalized = x_normalized.at[i, :].set(self.layer_norm2(x[i, :]))
-        return x + self.act_layer(x_normalized)
+        return x + self.act_layer(self.layer_norm2(x))
 
 
 class DTransformerEmbedding(nn.Module):
     """
-    Class to preprocess strings before feeding them into a DTransformer model 
+    Class to preprocess strings before feeding them into a DTransformer model
     (Algorithm 10 in [PH])
     """
 
@@ -178,30 +168,17 @@ class DTransformerEmbedding(nn.Module):
 
     def __call__(self, x: jnp.ndarray):
         assert self.l_max >= x.size
-        x = x.astype(int) 
+        x = x.astype(int)
 
         # note that we embed all possible positions even though len(x) might be less
         x_wembed = self.word_embed(x)
-        # it seems as if we only need the matrix instead of pos_embed(x) 
+        # it seems as if we only need the matrix instead of pos_embed(x)
         # the latter is just used to access the variables at all
         # TODO: is there a better way?
-        x_pembed = self.pos_embed(x) 
-        pembed = self.pos_embed.variables['params']['embedding']
-        
-        return x_wembed[:x.size, :] + pembed[:x.size, :]
+        _ = self.pos_embed(x)
+        pembed = self.pos_embed.variables["params"]["embedding"]
 
-
-class TransformerUnembedding(nn.Module):
-    """Turn result of Transformer blocks into probabilities
-    This is Algorithm 7 in Phuong-Hutter.
-    """
-
-    vocab_size: int
-
-    @nn.compact
-    def __call__(self, x: jnp.ndarray):
-        lin_layer = nn.Dense(features=self.vocab_size, use_bias=False)
-        return jax.nn.softmax(lin_layer(x))
+        return x_wembed[: x.size, :] + pembed[: x.size, :]
 
 
 class DTransformer(nn.Module):
@@ -226,23 +203,20 @@ class DTransformer(nn.Module):
                 d_v=self.d_v,
                 d_out=self.d_e,  # TODO: good choice?
                 attn_heads=self.attn_heads,
-                l_x=self.l_max,
             )
             for _ in range(self.num_layers)
         ]
         self.final_layer_norm = LayerNormalization()
-        self.unembed = TransformerUnembedding(vocab_size=self.vocab_size)
+        self.unembed_lin_layer = nn.Dense(features=self.vocab_size, use_bias=False)
 
     def __call__(self, x: jnp.ndarray):
         x = self.dtransformer_embed(x)
         for _, layer in enumerate(self.layers):
             x = layer(x)
-
-        for i in range(x.shape[0]):
-            # TODO: again refactor to matrix form?! jit?
-            x = x.at[i, :].set(self.final_layer_norm(x[i, :]))
-
-        return self.unembed(x)
+        x = self.final_layer_norm(x)
+        # unembedding (Algorithm 7 in [PH])
+        out = jax.nn.softmax(self.unembed_lin_layer(x))
+        return out
 
     def infer(
         self,
