@@ -1,9 +1,12 @@
 """
 TODO: 
 - dependencies
+- fix imports
 - vmap/jit where possible (e.g. for loops)
 - use logging
 - type annotation
+- consider batch dimension
+- deduce the lengths as much as possible
 
 """
 import logging
@@ -20,7 +23,7 @@ from tokenizers import Tokenizer
 
 
 class Attention(nn.Module):
-    d_attn: int  # embedding dimension of key and query ("attention dimension")
+    d_attn: int  # "attention dimension"
     d_v: int  # dimension of value (d_mid or d_out in Phuong/Hutter)
     unidirectional: bool = True  # decides if it attention is unidirectional or not
 
@@ -29,7 +32,7 @@ class Attention(nn.Module):
         """Compute attention for x, z.
         For concreteness assume that x, z are of shape (l_x, d_x), (l_z, d_z) where
         l_x, d_x is the token length, embedding dimension respectively and similarly
-        for z.
+        for z. Typically, d_x = d_z = d_e (cf. below).
 
         Args:
             x: current token (embedded)
@@ -38,20 +41,12 @@ class Attention(nn.Module):
         Returns:
             attn: attention of shape (l_x, d_v)
         """
-        # operator of shape (d_x, d_attn) (features = number of cols = output dimension)
-        # query of shape (l_x, d_attn) NOTE: always left multiply with input
-        query = nn.Dense(features=self.d_attn)(x)  # contains bias by default
-
-        # operator of shape (d_z, d_attn)
-        # key of shape (l_z, d_attn)
-        key = nn.Dense(features=self.d_attn)(z)
-
-        # operator of shape (d_z, d_v)
-        # value of shape (l_z, d_v)
-        value = nn.Dense(features=self.d_v)(z)
-
-        # scores of shape (l_x, l_z)
-        scores = query @ jnp.transpose(key)
+        # features = number of cols = output dimension
+        # NOTE: always left multiply with input
+        query = nn.Dense(features=self.d_attn)(x)  # (l_x, d_attn)
+        key = nn.Dense(features=self.d_attn)(z) # (l_z, d_attn)
+        value = nn.Dense(features=self.d_v)(z) # value of shape (l_z, d_v)
+        scores = query @ jnp.transpose(key) # (l_x, l_z)
 
         # masking
         if self.unidirectional:
@@ -63,13 +58,13 @@ class Attention(nn.Module):
 
 
 class MHAttention(nn.Module):
-    d_attn: int  # embedding dimension of key and query ("attention dimension")
+    d_attn: int  # "attention dimension"
     d_v: int  # dimension of value (d_mid or d_out in Phuong/Hutter)
     d_out: int  # output dimension
     attn_heads: int  # number of heads
 
     def setup(self):
-        # TODO: ordering unimportant?
+        # TODO: ordering of heads unimportant?
         self.heads = [
             Attention(d_attn=self.d_attn, d_v=self.d_v, unidirectional=True)
             for _ in range(self.attn_heads)
@@ -96,8 +91,6 @@ class DTransformerActivationLayer(nn.Module):
 
 class LayerNormalization(nn.Module):
     offset: bool = True  # decides if we include a learnable offset/bias
-
-    # TODO: row-wise layer normalization?
 
     @nn.compact
     def __call__(self, e):
@@ -132,7 +125,6 @@ class DTransformerBlock(nn.Module):
         self.act_layer = DTransformerActivationLayer(d_mlp=self.d_mlp, d_e=self.d_e)
         self.layer_norm1 = LayerNormalization()
         self.layer_norm2 = LayerNormalization()
-        # TODO: is there some sort of "Makefile auto-completion"?
         self.mhattention = MHAttention(
             d_attn=self.d_attn,
             d_v=self.d_v,
@@ -169,16 +161,12 @@ class DTransformerEmbedding(nn.Module):
     def __call__(self, x: jnp.ndarray):
         assert self.l_max >= x.size
         x = x.astype(int)
-
-        # note that we embed all possible positions even though len(x) might be less
+        l_x = x.shape[0]
         x_wembed = self.word_embed(x)
-        # it seems as if we only need the matrix instead of pos_embed(x)
-        # the latter is just used to access the variables at all
-        # TODO: is there a better way?
-        _ = self.pos_embed(x)
-        pembed = self.pos_embed.variables["params"]["embedding"]
+        positions = jnp.arange(0, l_x)
+        x_pembed = self.pos_embed(positions)
 
-        return x_wembed[: x.size, :] + pembed[: x.size, :]
+        return x_wembed + x_pembed
 
 
 class DTransformer(nn.Module):
