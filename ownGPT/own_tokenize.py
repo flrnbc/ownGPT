@@ -4,8 +4,7 @@ from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
-from ownGPT import config
-#import config
+from .config import Config
 from typing import List
 
 
@@ -32,7 +31,7 @@ def train_BPE_tokenizer(
     tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
     trainer = BpeTrainer(
         special_tokens=["[UNK]", "[BOS]", "[EOS]", "[MSK]"],
-        vocab_size=config.vocab_size,
+        vocab_size=Config.vocab_size,
     )
     tokenizer.pre_tokenizer = Whitespace()
     # TODO: already add convert to string here?
