@@ -18,7 +18,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
-from jax.nn import gelu
 from tokenizers import Tokenizer
 
 
@@ -41,12 +40,15 @@ class Attention(nn.Module):
         Returns:
             attn: attention of shape (l_x, d_v)
         """
+        # NOTE: operators always left multiply with input
         # features = number of cols = output dimension
-        # NOTE: always left multiply with input
+        l_x = x.shape[0]
+        l_z = z.shape[0]
         query = nn.Dense(features=self.d_attn)(x)  # (l_x, d_attn)
         key = nn.Dense(features=self.d_attn)(z) # (l_z, d_attn)
-        value = nn.Dense(features=self.d_v)(z) # value of shape (l_z, d_v)
-        scores = query @ jnp.transpose(key) # (l_x, l_z)
+        value = nn.Dense(features=self.d_v)(z) # (l_z, d_v)
+        scores = query @ jnp.transpose(key) 
+        assert scores.shape == (l_x, l_z)
 
         # masking
         if self.unidirectional:
@@ -54,6 +56,7 @@ class Attention(nn.Module):
             scores = jnp.where(mask, scores, -jnp.inf)
 
         attn = jax.nn.softmax(scores / math.sqrt(self.d_attn)) @ value
+        assert attn.shape == (l_x, self.d_v)
         return attn
 
 
@@ -72,8 +75,12 @@ class MHAttention(nn.Module):
         self.w_out = nn.Dense(features=self.d_out)
 
     def __call__(self, x, z):
+        l_x = x.shape[-2]
         y = jnp.concatenate([head(x, z) for head in self.heads], axis=-1)
-        return self.w_out(y)
+        assert y.shape == (l_x, self.attn_heads*self.d_v)
+        out = self.w_out(y)
+        assert out.shape == (l_x, self.d_out)
+        return self.w_out(y) 
 
 
 class DTransformerActivationLayer(nn.Module):
@@ -99,8 +106,7 @@ class LayerNormalization(nn.Module):
             # normalize along last axis
             mean = jnp.mean(e, axis=-1, keepdims=True)
             scale = jnp.std(e, axis=-1, keepdims=True)
-            # if scale == 0: # TODO: do not treat scale == 0 here because to make jit work
-            #    scale = 1
+            # TODO: do not treat scale == 0 here because to make jit work
             return (e - mean) / scale
 
         # learnable parameters
@@ -133,14 +139,14 @@ class DTransformerBlock(nn.Module):
         )
 
     def __call__(self, x):
-        """
-        Input:
-            - x: typically a 2D arrays whose rows are the word + positional embeddings
-                of the tokens
-        TODO: check for dimension?
-        """
+        # assume that we work with batches
+        assert len(x.shape) == 3, "Require batches"
+        b, l_x, d_x = x.shape
+
         x_normalized = self.layer_norm1(x)
-        x = x + self.mhattention(x_normalized, x_normalized)
+        # use vmap to deal with batches (along first axis)
+        x = x + jax.vmap(self.mhattention)(x_normalized, x_normalized)
+        assert x.shape == (b, l_x, self.d_out)
         return x + self.act_layer(self.layer_norm2(x))
 
 
@@ -152,14 +158,14 @@ class DTransformerEmbedding(nn.Module):
 
     d_e: int  # word/positional embedding dimension
     l_max: int  # maximal token length
-    vocab_size: int  # TODO: can read from tokens_file?!?
+    vocab_size: int
 
     def setup(self):
         self.word_embed = nn.Embed(num_embeddings=self.vocab_size, features=self.d_e)
         self.pos_embed = nn.Embed(num_embeddings=self.l_max, features=self.d_e)
 
     def __call__(self, x: jnp.ndarray):
-        assert self.l_max >= x.size
+        assert self.l_max >= x.size, "Provided token exceeds maximal token length."
         x = x.astype(int)
         l_x = x.shape[0]
         x_wembed = self.word_embed(x)
@@ -170,8 +176,7 @@ class DTransformerEmbedding(nn.Module):
 
 
 class DTransformer(nn.Module):
-    vocab_size: int  # vocabulary size
-    # TODO: determined by tokenizer?
+    vocab_size: int  # TODO: determined by tokenizer?
     l_max: int  # max sequence length
     d_e: int  # word embedding dimension
     d_v: int
@@ -189,7 +194,7 @@ class DTransformer(nn.Module):
                 d_mlp=self.d_mlp,
                 d_attn=self.d_e,
                 d_v=self.d_v,
-                d_out=self.d_e,  # TODO: good choice?
+                d_out=self.d_e,  # NOTE: this seems to be the standard choice
                 attn_heads=self.attn_heads,
             )
             for _ in range(self.num_layers)
@@ -198,12 +203,15 @@ class DTransformer(nn.Module):
         self.unembed_lin_layer = nn.Dense(features=self.vocab_size, use_bias=False)
 
     def __call__(self, x: jnp.ndarray):
+        b, l_x = x.shape
         x = self.dtransformer_embed(x)
+        assert x.shape == (b, l_x, self.d_e)
         for _, layer in enumerate(self.layers):
             x = layer(x)
         x = self.final_layer_norm(x)
         # unembedding (Algorithm 7 in [PH])
         out = jax.nn.softmax(self.unembed_lin_layer(x))
+        assert out.shape == (b, l_x, self.vocab_size)
         return out
 
     def infer(
@@ -256,7 +264,7 @@ class DTransformer(nn.Module):
             else:
                 y_ids = y_ids.at[p_idx].set(new_token)
 
-            print(y_ids)
+            #print(y_ids)
             generated_tokens = generated_tokens.at[i].set(new_token)
 
         return tokenizer.decode(generated_tokens)
