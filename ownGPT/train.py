@@ -1,7 +1,10 @@
 from pathlib import Path
+from dataclasses import dataclass
+from typing import List
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import orbax.checkpoint
 from flax import linen as nn
@@ -9,17 +12,9 @@ from flax.training import orbax_utils
 from flax.training.train_state import TrainState
 
 #from own_tokenize import Tokenizer
-from ownGPT import config, model, own_tokenize
-
-
-@jax.jit
-def cross_entropy(prob_distr: jnp.ndarray, sample: jnp.ndarray):
-    # TODO: vectorize instead of jit?
-    loss = 0.0
-    cols = sample.size
-    for i in range(cols - 1):
-        loss -= jnp.log(prob_distr[i, sample[i + 1]])
-    return loss
+from .own_tokenize import train_BPE_tokenizer, encode_file
+from .config import Config
+from .model import DTransformer
 
 
 """ NOTE: the following is essentially the spelt out version of TrainState
@@ -35,21 +30,32 @@ def update_step(tx, apply_fn, sample, opt_state, params, state):
     params = optax.apply_updates(params, updates)
     return opt_state, params, state """
 
+def train_step(state: TrainState, minibatch: jnp.ndarray, vocab_size, l_max): # TODO: read vocab_size from model/state?
+    """
+    Train model using minibatches (2D arrays where each row is a token sequence of length l_max + 1 (predict the last token)).
+    """
+    def compute_loss(params, x, y):
+        P = state.apply_fn({"params": params}, x)
+        P_one_hot = jax.nn.one_hot(
+            y, num_classes=vocab_size
+        )
+        assert P.shape == P_one_hot.shape
+        cross_entropy = optax.softmax_cross_entropy(
+            logits=P, labels=P_one_hot
+        )
+        # return P as well e.g. for logging purposes
+        return jnp.mean(cross_entropy), P
 
-def train_step(state: TrainState, sample: jnp.ndarray):
-    def loss_fn(params):
-        P = state.apply_fn({"params": params}, sample)
-        loss = cross_entropy(prob_distr=P, sample=sample)
-        return loss
-
-    # TODO: no optimizer?
-    grad_fn = jax.value_and_grad(loss_fn)
-    loss, grads = grad_fn(state.params)
+    batch_size = minibatch.shape[0]
+    # NOTE: implicitly checks if minibatch is 2D as well
+    assert minibatch.shape == (batch_size, l_max + 1) 
+    grad_fn = jax.value_and_grad(compute_loss) # TODO: no optimizer?
+    (loss, P), grads = grad_fn(state.params)
     # print(f"Loss: {loss}")
     new_state = state.apply_gradients(grads=grads)
-    return new_state, loss  # TODO: does the state store the new params?!?
-
-
+    return new_state, loss  
+    
+# TODO: does the state store the new params?!?
 # NOTE: one key point of jax seems to be the 'decoupling' of the state and the model
 # for example, we only train the state and the model only goes into the state via the
 # apply_fn!
@@ -62,7 +68,8 @@ def train(
     # optimizer,
     epochs: int,
 ):
-    assert len(train_data) > l_max, "Training data not long enough."  # TODO: necessary?
+    assert len(train_data) > l_max, "Training data not long enough."
+    # TODO: build batch
     sample_size = len(train_data) - l_max
 
     # init_vars = model.init(jax.random.PRNGKey(42), jnp.ones(config.l_max))
@@ -71,33 +78,63 @@ def train(
 
     for _ in range(epochs):
         for i in range(sample_size):
-            # TODO: check training!
-            state, loss = train_step(state=state, sample=train_data[i : l_max + i - 1])
+            # TODO: check training! How to vectorize?
+            sample = train_data[i : l_max + i]
+            state, loss = train_step(state=state, minibatch=sample)
             if i % 100 == 0:
                 print(f"step {i}, loss: {loss}")
 
     return state
 
+@dataclass
+class NaiveDataLoader:
+    """Naive because we load all the data into memory. Also only work with txt-file."""
+    data_path: Path
+    seq_length: int
 
+    def minibatch(self, batch_size: int, key) -> jnp.array:
+        """
+        Args:
+            batch_size: int
+            number_of_batches: int
+
+        Returns:
+            minibatch of batch_size. Each row of a minibatch is a 1D jnp.array
+            of length seq_length + 1. It corresponds to a consecutive token sequence of the same
+            length randomly selected from data_path (after encoding).
+        """
+        tokenizer = train_BPE_tokenizer([str(self.data_path)])
+        full_train_data = jnp.array(
+            encode_file(tokenizer, self.data_path).ids
+        )
+        stop = full_train_data.size - (self.seq_length + 1)
+        assert stop >= 0, "Train data not long enough."
+        starts_of_batch_rows = jax.random.randint(key=key, shape=(batch_size,), minval=0, maxval=stop+1) # values are in [minval, maxval) so need stop+1
+        # TODO: could not make the following work with e.g. vmap...
+        minibatch = jnp.array([full_train_data[start:start+self.seq_length+1] for start in starts_of_batch_rows])
+        return minibatch
+
+
+# TODO: use model as input
 def train_dtransformer(
     train_set: Path, epochs, save_path, limit: int=None
 ):
-    tokenizer = own_tokenize.train_BPE_tokenizer([str(train_set)])
+    tokenizer = train_BPE_tokenizer([str(train_set)])
     train_data = jnp.array(
-        own_tokenize.encode_file(tokenizer, train_set, limit=limit).ids
+        encode_file(tokenizer, train_set, limit=limit).ids
     )
     vocab_size = tokenizer.get_vocab_size()
 
-    dt = model.DTransformer(
+    dt = DTransformer(
         vocab_size=vocab_size,
-        l_max=config.l_max,
-        d_e=config.d_e,
-        d_mlp=config.d_mlp,
-        d_v=config.d_v,
-        num_layers=config.num_layers,
-        attn_heads=config.attn_heads,
+        l_max=Config.l_max,
+        d_e=Config.d_e,
+        d_mlp=Config.d_mlp,
+        d_v=Config.d_v,
+        num_layers=Config.num_layers,
+        attn_heads=Config.attn_heads,
     )
-    init_vars = dt.init(jax.random.PRNGKey(42), jnp.ones(config.l_max))
+    init_vars = dt.init(jax.random.PRNGKey(42), jnp.ones(Config.l_max))
 
     # TODO: need to improve optimizer?
     optimizer = optax.adam(learning_rate=1e-2)
@@ -108,7 +145,7 @@ def train_dtransformer(
     # training
     train_meta_data = {"epochs": epochs, "train set": str(train_set)}
     trained_state = train(
-        state=state, train_data=train_data, l_max=config.l_max, epochs=epochs
+        state=state, train_data=train_data, l_max=Config.l_max, epochs=epochs
     )
 
     # store
@@ -120,8 +157,8 @@ def train_dtransformer(
 
 
 if __name__ == "__main__":
-    train_set = Path(config.data_path) / Path("tokenize/Tolstoy_WarAndPeace.txt")
-    save_path = Path(config.models_path / "first")
-    train_dtransformer(train_set=train_set, epochs=10, save_path=save_path)
+    train_set = Path(Config.data_path) / Path("tokenize/test.txt") # Tolstoy_WarAndPeace.txt")
+    save_path = Path(Config.models_path / "test2")
+    train_dtransformer(train_set=train_set, epochs=5, save_path=save_path)
 # tokenizer = own_tokenize.train_BPE_tokenizer([str(train_set)])
 # vocab_size = tokenizer.get_vocab_size()
