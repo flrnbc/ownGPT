@@ -12,9 +12,9 @@ from flax.training import orbax_utils
 from flax.training.train_state import TrainState
 
 #from own_tokenize import Tokenizer
-from .own_tokenize import train_BPE_tokenizer, encode_file
-from .config import Config
-from .model import DTransformer
+from own_tokenize import train_BPE_tokenizer, encode_file
+from config import Config
+from model import DTransformer
 
 
 """ NOTE: the following is essentially the spelt out version of TrainState
@@ -34,7 +34,13 @@ def train_step(state: TrainState, minibatch: jnp.ndarray, vocab_size, l_max): # 
     """
     Train model using minibatches (2D arrays where each row is a token sequence of length l_max + 1 (predict the last token)).
     """
-    def compute_loss(params, x, y):
+    batch_size = minibatch.shape[0]
+    # NOTE: implicitly checks if minibatch is 2D as well
+    assert minibatch.shape == (batch_size, l_max + 1) 
+    x = minibatch[:, :-1]
+    y = minibatch[:, 1:]
+
+    def compute_loss(params):
         P = state.apply_fn({"params": params}, x)
         P_one_hot = jax.nn.one_hot(
             y, num_classes=vocab_size
@@ -46,10 +52,9 @@ def train_step(state: TrainState, minibatch: jnp.ndarray, vocab_size, l_max): # 
         # return P as well e.g. for logging purposes
         return jnp.mean(cross_entropy), P
 
-    batch_size = minibatch.shape[0]
-    # NOTE: implicitly checks if minibatch is 2D as well
-    assert minibatch.shape == (batch_size, l_max + 1) 
-    grad_fn = jax.value_and_grad(compute_loss) # TODO: no optimizer?
+    # has_aux = True to consider only first argument of output; otherwise crashes 
+    # because loss function returns a tuple
+    grad_fn = jax.value_and_grad(compute_loss, has_aux=True) # TODO: no optimizer?
     (loss, P), grads = grad_fn(state.params)
     # print(f"Loss: {loss}")
     new_state = state.apply_gradients(grads=grads)
@@ -92,18 +97,21 @@ class NaiveDataLoader:
     data_path: Path
     seq_length: int
 
-    def minibatch(self, batch_size: int, key) -> jnp.array:
+    def get_tokenizer(self):
+        tokenizer = train_BPE_tokenizer([str(self.data_path)])
+        return tokenizer
+
+    def minibatch(self, batch_size: int, tokenizer, key) -> jnp.array:
         """
         Args:
             batch_size: int
-            number_of_batches: int
+            key
 
         Returns:
             minibatch of batch_size. Each row of a minibatch is a 1D jnp.array
             of length seq_length + 1. It corresponds to a consecutive token sequence of the same
             length randomly selected from data_path (after encoding).
         """
-        tokenizer = train_BPE_tokenizer([str(self.data_path)])
         full_train_data = jnp.array(
             encode_file(tokenizer, self.data_path).ids
         )
@@ -117,12 +125,14 @@ class NaiveDataLoader:
 
 # TODO: use model as input
 def train_dtransformer(
-    train_set: Path, epochs, save_path, limit: int=None
+    train_set: Path, batch_size: int, epochs: int, save_path, limit: int=None
 ):
-    tokenizer = train_BPE_tokenizer([str(train_set)])
-    train_data = jnp.array(
-        encode_file(tokenizer, train_set, limit=limit).ids
-    )
+    #train_data = jnp.array(
+    #    encode_file(tokenizer, train_set, limit=limit).ids
+    #)
+
+    loader = NaiveDataLoader(data_path=train_set, seq_length=Config.l_max)
+    tokenizer = loader.get_tokenizer()
     vocab_size = tokenizer.get_vocab_size()
 
     dt = DTransformer(
@@ -134,7 +144,7 @@ def train_dtransformer(
         num_layers=Config.num_layers,
         attn_heads=Config.attn_heads,
     )
-    init_vars = dt.init(jax.random.PRNGKey(42), jnp.ones(Config.l_max))
+    init_vars = dt.init(jax.random.PRNGKey(42), jnp.ones((batch_size, Config.l_max)))
 
     # TODO: need to improve optimizer?
     optimizer = optax.adam(learning_rate=1e-2)
@@ -144,12 +154,15 @@ def train_dtransformer(
 
     # training
     train_meta_data = {"epochs": epochs, "train set": str(train_set)}
-    trained_state = train(
-        state=state, train_data=train_data, l_max=Config.l_max, epochs=epochs
-    )
+    key = jax.random.PRNGKey(87)
+    for idx in range(epochs):
+        key, _ = jax.random.split(key)
+        minibatch = loader.minibatch(batch_size=batch_size, tokenizer=tokenizer, key=key)
+        state, loss = train_step(state=state, minibatch=minibatch, vocab_size=vocab_size, l_max=Config.l_max)
+        print(f"epoch {idx}, loss: {loss}")
 
     # store
-    ckpt = {"model": trained_state, "train_meta_data": train_meta_data}
+    ckpt = {"model": state, "train_meta_data": train_meta_data}
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     save_args = orbax_utils.save_args_from_target(ckpt)  # mainly for speedup
     orbax_checkpointer.save(save_path, ckpt, save_args=save_args)
@@ -159,6 +172,6 @@ def train_dtransformer(
 if __name__ == "__main__":
     train_set = Path(Config.data_path) / Path("tokenize/test.txt") # Tolstoy_WarAndPeace.txt")
     save_path = Path(Config.models_path / "test2")
-    train_dtransformer(train_set=train_set, epochs=5, save_path=save_path)
+    train_dtransformer(train_set=train_set, batch_size=20, epochs=5, save_path=save_path)
 # tokenizer = own_tokenize.train_BPE_tokenizer([str(train_set)])
 # vocab_size = tokenizer.get_vocab_size()
