@@ -141,12 +141,12 @@ class DTransformerBlock(nn.Module):
     def __call__(self, x):
         # assume that we work with batches
         assert len(x.shape) == 3, "Require batches"
-        b, l_x, d_x = x.shape
+        batch_size, l_x, d_x = x.shape
 
         x_normalized = self.layer_norm1(x)
         # use vmap to deal with batches (along first axis)
         x = x + jax.vmap(self.mhattention)(x_normalized, x_normalized)
-        assert x.shape == (b, l_x, self.d_out)
+        assert x.shape == (batch_size, l_x, self.d_out)
         return x + self.act_layer(self.layer_norm2(x))
 
 
@@ -165,9 +165,9 @@ class DTransformerEmbedding(nn.Module):
         self.pos_embed = nn.Embed(num_embeddings=self.l_max, features=self.d_e)
 
     def __call__(self, x: jnp.ndarray):
-        assert self.l_max >= x.size, "Provided token exceeds maximal token length."
+        assert self.l_max >= x.shape[0], f"Provided token of length {x.shape[0]} exceeds maximal token length {self.l_max}."
         x = x.astype(int)
-        l_x = x.shape[0]
+        batch_size, l_x = x.shape
         x_wembed = self.word_embed(x)
         positions = jnp.arange(0, l_x)
         x_pembed = self.pos_embed(positions)
@@ -203,15 +203,15 @@ class DTransformer(nn.Module):
         self.unembed_lin_layer = nn.Dense(features=self.vocab_size, use_bias=False)
 
     def __call__(self, x: jnp.ndarray):
-        b, l_x = x.shape
+        batch_size, l_x = x.shape
         x = self.dtransformer_embed(x)
-        assert x.shape == (b, l_x, self.d_e)
+        assert x.shape == (batch_size, l_x, self.d_e)
         for _, layer in enumerate(self.layers):
             x = layer(x)
         x = self.final_layer_norm(x)
         # unembedding (Algorithm 7 in [PH])
         out = jax.nn.softmax(self.unembed_lin_layer(x))
-        assert out.shape == (b, l_x, self.vocab_size)
+        assert out.shape == (batch_size, l_x, self.vocab_size)
         return out
 
     def infer(
