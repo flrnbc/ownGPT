@@ -120,31 +120,37 @@ class NaiveDataLoader:
         starts_of_batch_rows = jax.random.randint(key=key, shape=(batch_size,), minval=0, maxval=stop+1) # values are in [minval, maxval) so need stop+1
         # TODO: could not make the following work with e.g. vmap...
         minibatch = jnp.array([full_train_data[start:start+self.seq_length+1] for start in starts_of_batch_rows])
+        assert minibatch.shape == (batch_size, self.seq_length+1)
         return minibatch
+
+
+def prepare_dtransformer(config, vocab_size) -> DTransformer:
+    dt = DTransformer(
+        vocab_size=vocab_size,
+        l_max=config.l_max,
+        d_e=config.d_e,
+        d_mlp=config.d_mlp,
+        d_v=config.d_v,
+        num_layers=config.num_layers,
+        attn_heads=config.attn_heads, 
+    )
+    return dt
 
 
 # TODO: use model as input
 def train_dtransformer(
-    train_set: Path, batch_size: int, epochs: int, save_path, limit: int=None
+    train_set: Path, config, batch_size: int, epochs: int, save_path, limit: int=None
 ):
     #train_data = jnp.array(
     #    encode_file(tokenizer, train_set, limit=limit).ids
     #)
-
-    loader = NaiveDataLoader(data_path=train_set, seq_length=Config.l_max)
+    # TODO: check earlier if save_path already exists
+    loader = NaiveDataLoader(data_path=train_set, seq_length=config.l_max)
     tokenizer = loader.get_tokenizer()
     vocab_size = tokenizer.get_vocab_size()
 
-    dt = DTransformer(
-        vocab_size=vocab_size,
-        l_max=Config.l_max,
-        d_e=Config.d_e,
-        d_mlp=Config.d_mlp,
-        d_v=Config.d_v,
-        num_layers=Config.num_layers,
-        attn_heads=Config.attn_heads,
-    )
-    init_vars = dt.init(jax.random.PRNGKey(42), jnp.ones((batch_size, Config.l_max)))
+    dt = prepare_dtransformer(config=config, vocab_size=vocab_size)
+    init_vars = dt.init(jax.random.PRNGKey(42), jnp.ones((batch_size, config.l_max)))
 
     # TODO: need to improve optimizer?
     optimizer = optax.adam(learning_rate=1e-2)
@@ -155,23 +161,23 @@ def train_dtransformer(
     # training
     train_meta_data = {"epochs": epochs, "train set": str(train_set)}
     key = jax.random.PRNGKey(87)
+    minibatch = loader.minibatch(batch_size=batch_size, tokenizer=tokenizer, key=key)
     for idx in range(epochs):
         key, _ = jax.random.split(key)
-        minibatch = loader.minibatch(batch_size=batch_size, tokenizer=tokenizer, key=key)
-        state, loss = train_step(state=state, minibatch=minibatch, vocab_size=vocab_size, l_max=Config.l_max)
-        print(f"epoch {idx}, loss: {loss}")
+        state, loss = train_step(state=state, minibatch=minibatch, vocab_size=vocab_size, l_max=config.l_max)
+        print(f"epoch {idx+1}, loss: {loss}")
 
     # store
     ckpt = {"model": state, "train_meta_data": train_meta_data}
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     save_args = orbax_utils.save_args_from_target(ckpt)  # mainly for speedup
     orbax_checkpointer.save(save_path, ckpt, save_args=save_args)
-    print("Model saved to {save_path}")
+    print(f"Model saved to {save_path.name}")
 
 
 if __name__ == "__main__":
-    train_set = Path(Config.data_path) / Path("tokenize/test.txt") # Tolstoy_WarAndPeace.txt")
-    save_path = Path(Config.models_path / "test2")
-    train_dtransformer(train_set=train_set, batch_size=20, epochs=5, save_path=save_path)
+    train_set = Path(Config.data_path) / Path("tokenize/Tolstoy_WarAndPeace.txt")
+    save_path = Path(Config.models_path / "test5")
+    train_dtransformer(train_set=train_set, config=Config, batch_size=200, epochs=50, save_path=save_path)
 # tokenizer = own_tokenize.train_BPE_tokenizer([str(train_set)])
 # vocab_size = tokenizer.get_vocab_size()
