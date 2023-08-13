@@ -97,6 +97,8 @@ class DTransformerActivationLayer(nn.Module):
 
 
 class LayerNormalization(nn.Module):
+    """Alternatively, use nn.LayerNorm.
+    """
     offset: bool = True  # decides if we include a learnable offset/bias
 
     @nn.compact
@@ -106,7 +108,7 @@ class LayerNormalization(nn.Module):
             # normalize along last axis
             mean = jnp.mean(e, axis=-1, keepdims=True)
             scale = jnp.std(e, axis=-1, keepdims=True)
-            # TODO: do not treat scale == 0 here because to make jit work
+            # TODO: do not treat scale == 0 here to make jit work
             return (e - mean) / scale
 
         # learnable parameters
@@ -126,11 +128,12 @@ class DTransformerBlock(nn.Module):
     d_v: int  # dimension of value (d_mid or d_out in Phuong/Hutter)
     d_out: int  # output dimension
     attn_heads: int  # number of heads
+    bias_normalization: bool = True
 
     def setup(self):
         self.act_layer = DTransformerActivationLayer(d_mlp=self.d_mlp, d_e=self.d_e)
-        self.layer_norm1 = LayerNormalization()
-        self.layer_norm2 = LayerNormalization()
+        self.layer_norm1 = LayerNormalization() # nn.LayerNorm(epsilon=1e-6, use_bias=self.bias_normalization) #
+        self.layer_norm2 = LayerNormalization() # nn.LayerNorm(epsilon=1e-6, use_bias=self.bias_normalization)
         self.mhattention = MHAttention(
             d_attn=self.d_attn,
             d_v=self.d_v,
@@ -143,11 +146,11 @@ class DTransformerBlock(nn.Module):
         assert len(x.shape) == 3, "Require batches"
         batch_size, l_x, d_x = x.shape
 
-        x_normalized = self.layer_norm1(x)
+        x_normalized = jax.vmap(self.layer_norm1)(x)
         # use vmap to deal with batches (along first axis)
         x = x + jax.vmap(self.mhattention)(x_normalized, x_normalized)
         assert x.shape == (batch_size, l_x, self.d_out)
-        return x + self.act_layer(self.layer_norm2(x))
+        return x + self.act_layer(jax.vmap(self.layer_norm2)(x))
 
 
 class DTransformerEmbedding(nn.Module):
@@ -165,14 +168,16 @@ class DTransformerEmbedding(nn.Module):
         self.pos_embed = nn.Embed(num_embeddings=self.l_max, features=self.d_e)
 
     def __call__(self, x: jnp.ndarray):
-        assert self.l_max >= x.shape[0], f"Provided token of length {x.shape[0]} exceeds maximal token length {self.l_max}."
+        assert self.l_max >= x.shape[1], f"Provided token of length {x.shape[1]} exceeds maximal token length {self.l_max}."
         x = x.astype(int)
         batch_size, l_x = x.shape
         x_wembed = self.word_embed(x)
         positions = jnp.arange(0, l_x)
         x_pembed = self.pos_embed(positions)
 
-        return x_wembed + x_pembed
+        embeddings = x_wembed + x_pembed
+        assert (batch_size, l_x, self.d_e) == embeddings.shape
+        return embeddings
 
 
 class DTransformer(nn.Module):
@@ -183,6 +188,7 @@ class DTransformer(nn.Module):
     d_mlp: int  # output dimension of "activation layers"
     num_layers: int  # number of layers
     attn_heads: int  # number of attention heads in each layer
+    bias_normalization: bool = True
 
     def setup(self):
         self.dtransformer_embed = DTransformerEmbedding(
@@ -199,7 +205,7 @@ class DTransformer(nn.Module):
             )
             for _ in range(self.num_layers)
         ]
-        self.final_layer_norm = LayerNormalization()
+        self.final_layer_norm = LayerNormalization() # nn.LayerNorm(epsilon=1e-6, use_bias=self.bias_normalization)
         self.unembed_lin_layer = nn.Dense(features=self.vocab_size, use_bias=False)
 
     def __call__(self, x: jnp.ndarray):
@@ -208,7 +214,7 @@ class DTransformer(nn.Module):
         assert x.shape == (batch_size, l_x, self.d_e)
         for _, layer in enumerate(self.layers):
             x = layer(x)
-        x = self.final_layer_norm(x)
+        x = jax.vmap(self.final_layer_norm)(x)
         # unembedding (Algorithm 7 in [PH])
         out = jax.nn.softmax(self.unembed_lin_layer(x))
         assert out.shape == (batch_size, l_x, self.vocab_size)
@@ -223,9 +229,11 @@ class DTransformer(nn.Module):
         temperature: float = 1.0,
     ):
         x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
+        vocab_size = tokenizer.get_vocab_size()
         len_x_ids = len(x_ids)
 
         # pad/slice x_ids so that it is of length l_max
+        # TODO: really needed?
         l_max = self.l_max
         if self.l_max < len_x_ids:
             y_ids = x_ids[len_x_ids - l_max :]
@@ -234,6 +242,8 @@ class DTransformer(nn.Module):
             y_ids = jnp.pad(x_ids, (0, self.l_max - len_x_ids))
             start_idx = len_x_ids
         assert y_ids.size == l_max
+        y_ids = jnp.reshape(y_ids, newshape=(1, l_max))
+
 
         # the following array is mostly needed if we cannot
         # store all generated tokens in x_ids
@@ -243,6 +253,7 @@ class DTransformer(nn.Module):
         # P = self.apply(variables, y_ids)
 
         for i in range(l_gen):
+            
             P = self.apply(variables, y_ids)
             # dealing with indices
             if start_idx + i >= l_max - 1:
@@ -251,9 +262,12 @@ class DTransformer(nn.Module):
                 p_idx = start_idx + i
 
             # create new random key (otherwise always get same sample)
-            key, _ = jax.random.split(key)
+            batch_size, l, v = P.shape
+            assert (batch_size, l, v) == (1, self.l_max, self.vocab_size)
+            P = jnp.reshape(P, newshape=P.shape[1:])
             p = jax.nn.softmax(P[p_idx, :] / temperature)
             # print(p)
+            key, _ = jax.random.split(key)
             new_token = jax.random.choice(key=key, a=self.vocab_size, p=p)
             # print(f"max index: {jnp.argmax(P[p_idx, :])}, p_idx: {p_idx}")
 
