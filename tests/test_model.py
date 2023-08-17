@@ -28,6 +28,7 @@ class Cfg:
     d_mlp: int = 8
     d_out: int = 10
     attn_heads: int = 4
+    batches: int = 30
 
 
 @pytest.fixture
@@ -49,7 +50,7 @@ def test_attention(cfg):
         jax.random.uniform(key3, shape=(cfg.l_z, cfg.d_z)),
     )
     assert output.shape == (cfg.l_x, cfg.d_v)
-    print(output)
+    #print(output)
     # print(variables)
 
 
@@ -58,15 +59,14 @@ def test_multi_head_attention(cfg):
         d_attn=cfg.d_attn,
         d_v=cfg.d_v,
         d_out=cfg.d_out,
-        attn_heads=cfg.attn_heads,
-        l_x=cfg.l_x,
+        attn_heads=cfg.attn_heads
     )
     variables = mattn.init(
         jax.random.PRNGKey(0),
         jnp.ones((cfg.l_x, cfg.d_x)),
         jnp.ones((cfg.l_z, cfg.d_z)),
     )
-    print(variables)
+    #print(variables)
     output = mattn.apply(
         variables,
         jax.random.uniform(key=jax.random.PRNGKey(0), shape=(cfg.l_x, cfg.d_x)),
@@ -95,11 +95,11 @@ def test_linear_normalization():
 def test_DTransformerActivation(cfg):
     dta = model.DTransformerActivationLayer(d_mlp=cfg.d_mlp, d_e=cfg.d_e)
     key, subkey = jax.random.split(jax.random.PRNGKey(0))
-    variables = dta.init(key, jnp.ones((cfg.l_x, cfg.d_e)))
+    variables = dta.init(key, jnp.ones((cfg.batches, cfg.l_x, cfg.d_e)))
     returned = dta.apply(
-        variables, jax.random.uniform(key=subkey, shape=(cfg.l_x, cfg.d_e))
+        variables, jax.random.uniform(key=subkey, shape=(cfg.batches, cfg.l_x, cfg.d_e))
     )
-    assert returned.shape == (cfg.l_x, cfg.d_e)
+    assert returned.shape == (cfg.batches, cfg.l_x, cfg.d_e)
     print(returned)
 
 
@@ -110,32 +110,32 @@ def test_DTransformerBlock(cfg):
         d_attn=cfg.d_attn,
         d_v=cfg.d_v,
         d_out=cfg.d_e,
-        attn_heads=cfg.attn_heads,
-        l_x=cfg.l_x,
+        attn_heads=cfg.attn_heads
     )
     key, subkey = jax.random.split(jax.random.PRNGKey(2))
-    variables_dtb = dtb.init(key, jnp.ones((cfg.l_x, cfg.d_e)))
-    returned = dtb.apply(variables_dtb, jax.random.uniform(subkey, (cfg.l_x, cfg.d_e)))
-    assert returned.shape == (cfg.l_x, cfg.d_e)
+    variables_dtb = dtb.init(key, jnp.ones((cfg.batches, cfg.l_x, cfg.d_e)))
+    returned = dtb.apply(variables_dtb, jax.random.uniform(subkey, (cfg.batches, cfg.l_x, cfg.d_e)))
+    assert returned.shape == (cfg.batches, cfg.l_x, cfg.d_e)
     print(returned)
 
 
 def test_TransformerEmbedding(test_path, cfg):
     te = model.DTransformerEmbedding(
         d_e=cfg.d_e,
-        l_max=cfg.l_x,
+        l_max=cfg.l_max,
         vocab_size=185,  # TODO: read from test_tokens.json?
     )
     tokens_file = test_path / Path("test_tokens.json")
     # TODO: fix Path vs string...
     tokenizer = own_tokenize.load_BPE_tokenizer(str(tokens_file))
-    x = "Hi there!"
+    x = "Hi"# there!"
     x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
     print(x_ids)
     print(type(x_ids))
     variables_te = te.init(jax.random.PRNGKey(0), jnp.ones(len(x_ids)))
     returned = te.apply(variables_te, x_ids)
     print(returned)
+    print(f"returned shape: {returned.shape}")
 
 
 @pytest.fixture
@@ -157,7 +157,7 @@ def dtransf(cfg):
         attn_heads=6,
     )
     key, subkey = jax.random.split(jax.random.PRNGKey(5))
-    variables = dtransformer.init(key, jax.random.normal(subkey, shape=(cfg.l_max,)))
+    variables = dtransformer.init(key, jax.random.normal(subkey, shape=(1, cfg.l_max)))
     return (dtransformer, variables)
 
 
@@ -169,9 +169,11 @@ def test_DTransformer(cfg, tokenizer, dtransf):
     l_x = len(x_ids)
     l_y = len(y_ids)
 
-    # need padding
-    x_ids = jnp.pad(np.array(x_ids), (0, cfg.l_max - l_x), "constant")
-    y_ids = jnp.pad(np.array(y_ids), (0, cfg.l_max - l_y), "constant")
+    # need padding and reshape
+    x_ids = jnp.pad(x_ids, (0, cfg.l_max - l_x), "constant")
+    x_ids = jnp.reshape(x_ids, (1, cfg.l_max))
+    y_ids = jnp.pad(y_ids, (0, cfg.l_max - l_y), "constant")
+    y_ids = jnp.reshape(y_ids, (1, cfg.l_max))
     # print(x_ids)
     # print(y_ids)
 
@@ -179,7 +181,7 @@ def test_DTransformer(cfg, tokenizer, dtransf):
     # NOTE: apply wraps the call (but a direct call throws an error...)
     returned_x = dtransformer.apply(variables, x_ids)
     returned_y = dtransformer.apply(variables, y_ids)
-    print(returned_x)
+    print(f"shape of returned x: {returned_x.shape}")
     print(returned_y)
 
 
