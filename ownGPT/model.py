@@ -1,11 +1,8 @@
 """
 TODO: 
 - dependencies
-- fix imports
 - vmap/jit where possible (e.g. for loops)
-- use logging
 - type annotation
-- consider batch dimension
 - deduce the lengths as much as possible
 
 """
@@ -87,7 +84,9 @@ class MHAttention(nn.Module):
 
 
 class DTransformerActivationLayer(nn.Module):
-    d_mlp: int  # "MLP dimension", see below (MLP: multi-layer perceptrons)
+    # "MLP dimension", see below (MLP: multi-layer perceptrons)
+    # typically d_mlp = d_e
+    d_mlp: int 
     d_e: int  # embedding dimension
     act_fn: Callable = jax.nn.gelu  # activation function
 
@@ -149,7 +148,7 @@ class DTransformerBlock(nn.Module):
         )
 
     def __call__(self, x):
-        # assume that we work with batches
+        # from here on assume that we work with batches
         assert len(x.shape) == 3, "Require batches"
         batch_size, l_x, d_x = x.shape
 
@@ -175,11 +174,11 @@ class DTransformerEmbedding(nn.Module):
         self.pos_embed = nn.Embed(num_embeddings=self.l_max, features=self.d_e)
 
     def __call__(self, x: jnp.ndarray):
+        batch_size, l_x = x.shape
         assert (
-            self.l_max >= x.shape[1]
+            self.l_max >= l_x
         ), f"Provided token of length {x.shape[1]} exceeds maximal token length {self.l_max}."
         x = x.astype(int)
-        batch_size, l_x = x.shape
         x_wembed = self.word_embed(x)
         positions = jnp.arange(0, l_x)
         x_pembed = self.pos_embed(positions)
@@ -192,12 +191,12 @@ class DTransformerEmbedding(nn.Module):
 @dataclass
 class DTransformerConfig:
     d_e: int  # embedding dimension
-    # d_mlp: int  # output dimension of activation layers, typically d_mlp = d_e
-    vocab_size: int
     l_max: int  # maximal context/token length
     num_layers: int
     attn_heads: int  # number of attention heads
-    bias_normalization: bool=True
+    # NOTE: this choice is convenient because we usually set vocab_size later
+    vocab_size: int = 0
+    bias_normalization: bool = True
 
     """The following condition is required in many GPT implementations and is baked into the 
     implementation of Attention. However, it is made clear from Algorithm 4 [PH] (Attention) 
@@ -206,6 +205,7 @@ class DTransformerConfig:
     
     Note that we have d_e = d_v*attn_heads and d_v is often referred to as head_size.
     """
+
     def __post_init__(self):
         assert (
             self.d_e % self.attn_heads == 0
@@ -220,14 +220,16 @@ class DTransformer(nn.Module):
 
     def setup(self):
         self.dtransformer_embed = DTransformerEmbedding(
-            d_e=self.config.d_e, l_max=self.config.l_max, vocab_size=self.config.vocab_size
+            d_e=self.config.d_e,
+            l_max=self.config.l_max,
+            vocab_size=self.config.vocab_size,
         )
         self.layers = [
             DTransformerBlock(
                 d_e=self.config.d_e,
-                d_mlp=self.config.d_e, # common choice
-                d_attn=self.config.d_e, # common choice
-                d_v=self.config.d_v(), 
+                d_mlp=self.config.d_e,  # common choice
+                d_attn=self.config.d_e,  # common choice
+                d_v=self.config.d_v(),
                 d_out=self.config.d_e,
                 attn_heads=self.config.attn_heads,
             )
@@ -236,7 +238,9 @@ class DTransformer(nn.Module):
         self.final_layer_norm = (
             LayerNormalization()
         )  # nn.LayerNorm(epsilon=1e-6, use_bias=self.bias_normalization)
-        self.unembed_lin_layer = nn.Dense(features=self.config.vocab_size, use_bias=False)
+        self.unembed_lin_layer = nn.Dense(
+            features=self.config.vocab_size, use_bias=False
+        )
 
     def __call__(self, x: jnp.ndarray):
         batch_size, l_x = x.shape
@@ -256,6 +260,7 @@ class DTransformer(nn.Module):
         x: str,
         l_gen: int,
         variables,
+        key,
         temperature: float = 1.0,
     ):
         x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
@@ -277,9 +282,6 @@ class DTransformer(nn.Module):
         # the following array is mostly needed if we cannot
         # store all generated tokens in x_ids
         generated_tokens = jnp.zeros(l_gen, dtype=int)
-
-        key = jax.random.PRNGKey(23)
-        # P = self.apply(variables, y_ids)
 
         for i in range(l_gen):
             P = self.apply(variables, y_ids)

@@ -33,7 +33,7 @@ def update_step(tx, apply_fn, sample, opt_state, params, state):
 
 def train_step(
     state: TrainState, minibatch: jnp.ndarray, vocab_size, l_max
-):  # TODO: read vocab_size from model/state?
+):  
     """
     Train model using minibatches (2D arrays where each row is a token sequence of length l_max + 1 (predict the last token)).
     """
@@ -74,7 +74,6 @@ def train(
     epochs: int,
 ):
     assert len(train_data) > l_max, "Training data not long enough."
-    # TODO: build batch
     sample_size = len(train_data) - l_max
 
     # init_vars = model.init(jax.random.PRNGKey(42), jnp.ones(config.l_max))
@@ -131,7 +130,7 @@ class NaiveDataLoader:
         return minibatch
 
 
-# TODO: use model as input
+# TODO: use model as input to make more universal
 def train_dtransformer(
     train_set: Path,
     config: DTransformerConfig,

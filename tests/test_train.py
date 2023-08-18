@@ -29,7 +29,6 @@ class Cfg:
 @pytest.fixture
 def config():
     config = model.DTransformerConfig(
-        vocab_size=0, # set it later correctly
         l_max=16,
         d_e=64,
         num_layers=4,
@@ -58,12 +57,7 @@ def test_NaiveDataLoader():
 
 
 def test_training(test_path, config, save_path):
-    # delete checkpoint if it exists for testing purposes
-    # TODO: fix!!
-    #try:
-    #    save_path.unlink()
-    #except FileNotFoundError:
-    #    print(f"{save_path.name} not found. Continue.")
+    # TODO: delete checkpoint if it exists?
     train_set = Config.data_path / "tokenize" / "test.txt"
     train.train_dtransformer(train_set=train_set, config=config, batch_size=32, epochs=48, save_path=save_path)
 
@@ -84,11 +78,14 @@ def test_trained_model(test_path, config, save_path):
     # TODO: could read from checkpoint?
     config.vocab_size = vocab_size
     dtransfomer = model.DTransformer(config)
+    key = jax.random.PRNGKey(23)
 
     inputs = ["Here we just", "How are you?", "Kindergarten is"]
     for x in inputs:
         print(f"Input: {x} \nEncoded: {tokenizer.encode(x).ids}")
+        # TODO: should we split here or not?
+        # key, _ = jax.random.split(key)
         returned = dtransfomer.infer(
-            tokenizer=tokenizer, x=x, l_gen=16, variables=params, temperature=.1
+            tokenizer=tokenizer, x=x, l_gen=8, variables=params, key=key, temperature=.1
         )
         print(f"Returned: {returned}")
