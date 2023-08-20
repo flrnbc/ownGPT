@@ -49,20 +49,23 @@ def test_NaiveDataLoader():
         data_path=train_set,
         seq_length=seq_length
     )
-    tokenizer = loader.get_tokenizer()
+    tokenizer = own_tokenize.train_BPE_tokenizer([str(train_set)])
     key = jax.random.PRNGKey(23)
     minibatch = loader.minibatch(batch_size=batch_size, key=key, tokenizer=tokenizer)
     assert minibatch.shape == (batch_size, seq_length + 1)
     print(minibatch)
 
 
-def test_training(test_path, config, save_path):
+def test_training(config, save_path):
     # TODO: delete checkpoint if it exists?
+    dt = model.DTransformer(config=config)
     train_set = Config.data_path / "tokenize" / "test.txt"
-    train.train_dtransformer(train_set=train_set, config=config, batch_size=32, epochs=48, save_path=save_path)
+    tokenizer = own_tokenize.train_BPE_tokenizer(file_paths=[str(train_set)])
+    train_cfg = train.TrainConfig(batch_size=32, epochs=3600, learning_rate=6e-3, seed=42)
+    train.train_model(model=dt, train_set=train_set, tokenizer=tokenizer, train_cfg=train_cfg, save_path=save_path)
 
 
-def test_trained_model(test_path, config, save_path):
+def test_trained_model(config, save_path):
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     restored = orbax_checkpointer.restore(save_path)
     model_params = restored["model"]["params"]  # because we saved it like that

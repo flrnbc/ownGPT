@@ -12,6 +12,7 @@ from flax.training import orbax_utils
 from flax.training.train_state import TrainState
 
 # from own_tokenize import Tokenizer
+from tokenizers import Tokenizer
 from own_tokenize import train_BPE_tokenizer, encode_file
 from config import Config
 from model import DTransformer, DTransformerConfig
@@ -35,7 +36,7 @@ def train_step(
     state: TrainState, minibatch: jnp.ndarray, vocab_size, l_max
 ):  
     """
-    Train model using minibatches (2D arrays where each row is a token sequence of length l_max + 1 (predict the last token)).
+    Train model using minibatches (2D arrays where each row is a token sequence of length l_max + 1 (predict next token)).
     """
     batch_size = minibatch.shape[0]
     # NOTE: implicitly checks if minibatch is 2D as well
@@ -51,8 +52,8 @@ def train_step(
         # return P as well e.g. for logging purposes
         return jnp.mean(cross_entropy), P
 
-    # has_aux = True to consider only first argument of output; otherwise crashes
-    # because loss function returns a tuple
+    # has_aux = True to consider only first argument of output 
+    # otherwise crashes because loss function returns a tuple
     grad_fn = jax.value_and_grad(compute_loss, has_aux=True)  # TODO: no optimizer?
     (loss, P), grads = grad_fn(state.params)
     # print(f"Loss: {loss}")
@@ -67,18 +68,14 @@ def train_step(
 
 
 def train(
-    state,
-    train_data,
-    l_max,
+    state: TrainState,
+    train_data: Path,
+    l_max: int,
     # optimizer,
     epochs: int,
 ):
     assert len(train_data) > l_max, "Training data not long enough."
     sample_size = len(train_data) - l_max
-
-    # init_vars = model.init(jax.random.PRNGKey(42), jnp.ones(config.l_max))
-    # tx = optax.adamw(learning_rate=learning_rate) # TODO: add more parameters?!?
-    # state = TrainState.create(apply_fn=model.apply, params=init_vars["params"], tx=optimizer)
 
     for _ in range(epochs):
         for i in range(sample_size):
@@ -93,25 +90,18 @@ def train(
 
 @dataclass
 class NaiveDataLoader:
-    """Naive because we load all the data into memory. Also only work with txt-file."""
+    """Naive because we load all the data into memory. Also only work with txt-files."""
 
     data_path: Path
     seq_length: int
 
-    def get_tokenizer(self):
-        tokenizer = train_BPE_tokenizer([str(self.data_path)])
-        return tokenizer
-
-    def minibatch(self, batch_size: int, tokenizer, key) -> jnp.array:
-        """
-        Args:
-            batch_size: int
-            key
-
+    def minibatch(self, batch_size: int, tokenizer: Tokenizer, key: jax.random.PRNGKey) -> jnp.array:
+        """Method to create a minibatch of batch_size.     
         Returns:
             minibatch of batch_size. Each row of a minibatch is a 1D jnp.array
-            of length seq_length + 1. It corresponds to a consecutive token sequence of the same
-            length randomly selected from data_path (after encoding).
+            of length seq_length + 1. It corresponds to a consecutive token sequence
+            of the same length randomly selected with 'key' from data_path after encoding 
+            via 'tokenizer'.
         """
         full_train_data = jnp.array(encode_file(tokenizer, self.data_path).ids)
         stop = full_train_data.size - (self.seq_length + 1)
@@ -129,41 +119,50 @@ class NaiveDataLoader:
         assert minibatch.shape == (batch_size, self.seq_length + 1)
         return minibatch
 
+@dataclass
+class TrainConfig:
+    batch_size: int
+    epochs: int
+    learning_rate: float
+    seed: int 
 
-# TODO: use model as input to make more universal
-def train_dtransformer(
+def train_model(
+    model: DTransformer, # TODO: general to other transformers from paper
     train_set: Path,
-    config: DTransformerConfig,
-    batch_size: int,
-    epochs: int,
-    save_path,
-    limit: int = None,
+    # config: DTransformerConfig,
+    tokenizer: Tokenizer,
+    train_cfg: TrainConfig,
+    save_path: Path,
+    # limit: int = None,
 ):
     # train_data = jnp.array(
     #    encode_file(tokenizer, train_set, limit=limit).ids
     # )
     # TODO: check earlier if save_path already exists
-    loader = NaiveDataLoader(data_path=train_set, seq_length=config.l_max)
-    tokenizer = loader.get_tokenizer()
+    cfg = model.config
+    l_max = cfg.l_max
+    loader = NaiveDataLoader(data_path=train_set, seq_length=l_max)
     vocab_size = tokenizer.get_vocab_size()
-    config.vocab_size = vocab_size
-    dt = DTransformer(config=config)
-    init_vars = dt.init(jax.random.PRNGKey(42), jnp.ones((batch_size, config.l_max)))
+    cfg.vocab_size = vocab_size
+
+    # deal with PRNG keys and init
+    key = jax.random.PRNGKey(train_cfg.seed)
+    key, init_key, load_key = jax.random.split(key, num=3) # TODO: independent enough?
+    init_vars = model.init(init_key, jnp.ones((train_cfg.batch_size, l_max)))
 
     # TODO: need to improve optimizer?
-    optimizer = optax.adam(learning_rate=6e-3)
+    optimizer = optax.adam(learning_rate=train_cfg.learning_rate)
     state = TrainState.create(
-        apply_fn=dt.apply, params=init_vars["params"], tx=optimizer
+        apply_fn=model.apply, params=init_vars["params"], tx=optimizer
     )
 
     # training
-    train_meta_data = {"epochs": epochs, "train set": str(train_set)}
-    key = jax.random.PRNGKey(87)
-    minibatch = loader.minibatch(batch_size=batch_size, tokenizer=tokenizer, key=key)
-    for idx in range(epochs):
-        key, _ = jax.random.split(key)
+    train_meta_data = {"epochs": train_cfg.epochs, "train set": str(train_set)}
+    # NOTE: we use the same minibatch for each epoch, see e.g. Algorithm 13 in [PH]
+    minibatch = loader.minibatch(batch_size=train_cfg.batch_size, tokenizer=tokenizer, key=load_key)
+    for idx in range(train_cfg.epochs):
         state, loss = train_step(
-            state=state, minibatch=minibatch, vocab_size=vocab_size, l_max=config.l_max
+            state=state, minibatch=minibatch, vocab_size=vocab_size, l_max=cfg.l_max
         )
         print(f"epoch {idx+1}, loss: {loss}")
 
@@ -178,7 +177,7 @@ def train_dtransformer(
 if __name__ == "__main__":
     train_set = Path(Config.data_path) / Path("tokenize/Tolstoy_WarAndPeace.txt")
     save_path = Path(Config.models_path / "test5")
-    train_dtransformer(
+    train_model(
         train_set=train_set,
         config=Config,
         batch_size=200,
