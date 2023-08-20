@@ -11,7 +11,7 @@ from typing import List
 def postprocess_tokenizer(tokenizer: Tokenizer) -> Tokenizer:
     # postprocessing a la BERT and transformer?!?
     # NOTE: the ordering is important
-    # TODO: is this correct? still quite unclear...
+    # TODO: is this really correct? still quite unclear...
     tokenizer.post_processor = TemplateProcessing(
         single="[BOS] $A [EOS]",
         pair="[BOS] $A [EOS] $B:1 [EOS]:1",

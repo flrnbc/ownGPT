@@ -260,7 +260,7 @@ class DTransformer(nn.Module):
         x: str,
         l_gen: int,
         variables,
-        key,
+        key: jax.random.PRNGKey,
         temperature: float = 1.0,
     ):
         x_ids = jnp.array(tokenizer.encode(x).ids, dtype=int)
@@ -291,12 +291,11 @@ class DTransformer(nn.Module):
             else:
                 p_idx = start_idx + i
 
-            # create new random key (otherwise always get same sample)
             batch_size, l, v = P.shape
             assert (batch_size, l, v) == (1, l_max, self.config.vocab_size)
             P = jnp.reshape(P, newshape=P.shape[1:])
             p = jax.nn.softmax(P[p_idx, :] / temperature)
-            # print(p)
+            # create new random key (otherwise always get same sample)
             key, _ = jax.random.split(key)
             new_token = jax.random.choice(key=key, a=self.config.vocab_size, p=p)
             # print(f"max index: {jnp.argmax(P[p_idx, :])}, p_idx: {p_idx}")
